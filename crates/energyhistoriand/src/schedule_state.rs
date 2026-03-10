@@ -1,4 +1,7 @@
-use chrono::Utc;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -7,6 +10,7 @@ pub struct CollectionScheduleSeed {
     pub source_id: String,
     pub collection_id: String,
     pub poll_interval_seconds: Option<u64>,
+    pub stagger_offset_seconds: Option<u64>,
     pub scheduler_enabled: bool,
 }
 
@@ -109,7 +113,7 @@ pub fn bootstrap_collection_discovery_tasks(
     conn: &Connection,
     seeds: &[CollectionScheduleSeed],
 ) -> usize {
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
     let mut bootstrapped = 0;
 
     for seed in seeds.iter().filter(|seed| seed.scheduler_enabled) {
@@ -145,12 +149,13 @@ pub fn bootstrap_collection_discovery_tasks(
             "{}:{}:discover:bootstrap",
             seed.source_id, seed.collection_id
         );
+        let available_at = next_discovery_time(seed, now).to_rfc3339();
         let inserted = conn
             .execute(
                 "INSERT OR IGNORE INTO tasks \
                  (task_id, source_id, collection_id, task_kind, idempotency_key, status, available_at) \
                  VALUES (?1, ?2, ?3, 'discover', 'bootstrap', 'queued', ?4)",
-                rusqlite::params![task_id, seed.source_id, seed.collection_id, now],
+                rusqlite::params![task_id, seed.source_id, seed.collection_id, available_at],
             )
             .unwrap_or(0);
 
@@ -162,13 +167,52 @@ pub fn bootstrap_collection_discovery_tasks(
                 &seed.collection_id,
                 &ScheduledTask {
                     task_id,
-                    available_at: now.clone(),
+                    available_at,
                 },
             );
         }
     }
 
     bootstrapped
+}
+
+pub fn smear_queued_discovery_tasks(conn: &Connection, seeds: &[CollectionScheduleSeed]) -> usize {
+    let now = Utc::now();
+    let mut updated = 0;
+
+    for seed in seeds.iter().filter(|seed| seed.scheduler_enabled) {
+        let available_at = next_discovery_time(seed, now).to_rfc3339();
+        updated += conn
+            .execute(
+                "UPDATE tasks \
+                 SET available_at = ?1 \
+                 WHERE source_id = ?2 \
+                   AND collection_id = ?3 \
+                   AND task_kind = 'discover' \
+                   AND status = 'queued'",
+                rusqlite::params![available_at, seed.source_id, seed.collection_id],
+            )
+            .unwrap_or(0);
+
+        conn.execute(
+            "UPDATE collection_schedule_state \
+             SET next_run_at = CASE \
+                     WHEN next_task_kind = 'discover' AND active_task_id IS NULL THEN ?1 \
+                     ELSE next_run_at \
+                 END, \
+                 updated_at = ?2 \
+             WHERE source_id = ?3 AND collection_id = ?4",
+            rusqlite::params![
+                available_at,
+                now.to_rfc3339(),
+                seed.source_id,
+                seed.collection_id,
+            ],
+        )
+        .ok();
+    }
+
+    updated
 }
 
 pub fn note_discover_scheduled(
@@ -373,4 +417,38 @@ pub fn list_collection_schedules(conn: &Connection) -> Vec<CollectionScheduleSna
     };
 
     rows.filter_map(Result::ok).collect()
+}
+
+pub fn next_discovery_time(seed: &CollectionScheduleSeed, now: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(interval_secs_u64) = seed.poll_interval_seconds else {
+        return now;
+    };
+    let interval_secs = interval_secs_u64.max(1) as i64;
+    let offset_secs = seed
+        .stagger_offset_seconds
+        .unwrap_or_default()
+        .min(interval_secs_u64.saturating_sub(1)) as i64;
+    let now_secs = now.timestamp();
+    let cycle_start = now_secs.div_euclid(interval_secs) * interval_secs;
+    let mut next_secs = cycle_start + offset_secs;
+    if next_secs <= now_secs {
+        next_secs += interval_secs;
+    }
+    DateTime::<Utc>::from_timestamp(next_secs, 0).unwrap_or(now + TimeDelta::seconds(1))
+}
+
+pub fn stable_stagger_offset_seconds(
+    source_id: &str,
+    collection_id: &str,
+    poll_interval_seconds: Option<u64>,
+) -> Option<u64> {
+    let interval = poll_interval_seconds?;
+    if interval <= 1 {
+        return Some(0);
+    }
+
+    let mut hasher = DefaultHasher::new();
+    source_id.hash(&mut hasher);
+    collection_id.hash(&mut hasher);
+    Some(hasher.finish() % interval)
 }

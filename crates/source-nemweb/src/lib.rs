@@ -10,9 +10,9 @@ use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, CollectionCompletion, CompletionUnit, DiscoveredArtifact,
-    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec, RunContext,
-    SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument,
-    SourcePlugin, TaskBlueprint, TaskKind,
+    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec,
+    RawTableRowSink, RunContext, SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry,
+    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -214,8 +214,23 @@ impl SourcePlugin for NemwebPlugin {
         bail!("Use ingest_recent or family-specific fetch for NEMweb")
     }
 
-    fn parse(&self, _artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
-        bail!("Use parse_local_archive via ingest_recent for NEMweb")
+    fn inspect_parse(&self, artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
+        let plan = parse::inspect_local_archive(artifact)?;
+        Ok(ParseResult {
+            observed_schemas: plan.observed_schemas,
+            raw_outputs: plan.raw_outputs,
+            promotions: Vec::new(),
+        })
+    }
+
+    fn stream_parse(
+        &self,
+        artifact: &LocalArtifact,
+        _ctx: &RunContext,
+        sink: &mut dyn RawTableRowSink,
+    ) -> Result<()> {
+        let plan = parse::inspect_local_archive(artifact)?;
+        parse::stream_local_archive_rows(artifact, &plan, sink)
     }
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {

@@ -176,16 +176,15 @@ pub fn record_discoveries(
     }
 }
 
-/// Schedule the next discovery task after a delay.
+/// Schedule the next discovery task at a concrete time.
 pub fn schedule_next_discovery(
     conn: &Connection,
     source_id: &str,
     collection_id: &str,
-    delay_secs: i64,
+    available_at: &str,
 ) -> ScheduledTask {
-    let ts = Utc::now().timestamp();
+    let ts = Utc::now().timestamp_millis();
     let task_id = format!("{source_id}:{collection_id}:discover:poll-{ts}");
-    let available = (Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
     enqueue_task_delayed(
         conn,
         &task_id,
@@ -193,12 +192,12 @@ pub fn schedule_next_discovery(
         collection_id,
         "discover",
         &format!("poll-{ts}"),
-        &available,
+        available_at,
     );
 
     ScheduledTask {
         task_id,
-        available_at: available,
+        available_at: available_at.to_string(),
     }
 }
 
@@ -279,7 +278,7 @@ pub fn record_parse(
         .iter()
         .map(|o| o.logical_table_key.as_str())
         .collect();
-    let total_rows: usize = result.raw_outputs.iter().map(|o| o.rows.len()).sum();
+    let total_rows: usize = result.raw_outputs.iter().map(|o| o.row_count()).sum();
 
     conn.execute(
         "UPDATE discovered_artifacts SET status = 'published', published_at = ?1 WHERE artifact_id = ?2",

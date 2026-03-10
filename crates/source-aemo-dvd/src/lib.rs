@@ -2,9 +2,9 @@ use anyhow::{Result, bail};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, CollectionCompletion, CompletionUnit, DiscoveredArtifact,
-    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec, RunContext,
-    SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint,
-    TaskKind,
+    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec,
+    RawTableRowSink, RunContext, SourceCollection, SourceDescriptor, SourceMetadataDocument,
+    SourcePlugin, TaskBlueprint, TaskKind,
 };
 
 pub struct AemoDvdPlugin;
@@ -118,8 +118,17 @@ impl SourcePlugin for AemoDvdPlugin {
         bail!("DVD acquisition/extraction implementation still needs to be built")
     }
 
-    fn parse(&self, _artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
+    fn inspect_parse(&self, _artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
         bail!("DVD parsing should be built on top of the same schema registry as NEMweb")
+    }
+
+    fn stream_parse(
+        &self,
+        _artifact: &LocalArtifact,
+        _ctx: &RunContext,
+        _sink: &mut dyn RawTableRowSink,
+    ) -> Result<()> {
+        bail!("DVD parsing should stream rows through the shared ingestion contract")
     }
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {

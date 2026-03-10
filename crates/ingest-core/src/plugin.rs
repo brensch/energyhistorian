@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -106,7 +108,67 @@ pub struct ParseResult {
 pub struct RawTableChunk {
     pub logical_table_key: String,
     pub schema_key: String,
+    #[serde(default)]
+    pub row_count: usize,
+    #[serde(default)]
     pub rows: Vec<Value>,
+}
+
+impl RawTableChunk {
+    pub fn row_count(&self) -> usize {
+        if self.row_count == 0 {
+            self.rows.len()
+        } else {
+            self.row_count
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawTableRow {
+    pub logical_table_key: String,
+    pub schema_key: String,
+    pub row: Value,
+}
+
+pub trait RawTableRowSink {
+    fn accept(&mut self, row: RawTableRow) -> Result<()>;
+}
+
+#[derive(Default)]
+struct CollectingRawTableRowSink {
+    order: Vec<(String, String)>,
+    rows_by_output: HashMap<(String, String), Vec<Value>>,
+}
+
+impl CollectingRawTableRowSink {
+    fn into_raw_outputs(self) -> Vec<RawTableChunk> {
+        let mut rows_by_output = self.rows_by_output;
+        self.order
+            .into_iter()
+            .filter_map(|(logical_table_key, schema_key)| {
+                let key = (logical_table_key.clone(), schema_key.clone());
+                rows_by_output.remove(&key).map(|rows| RawTableChunk {
+                    logical_table_key,
+                    schema_key,
+                    row_count: rows.len(),
+                    rows,
+                })
+            })
+            .collect()
+    }
+}
+
+impl RawTableRowSink for CollectingRawTableRowSink {
+    fn accept(&mut self, row: RawTableRow) -> Result<()> {
+        let key = (row.logical_table_key, row.schema_key);
+        let entry = self.rows_by_output.entry(key.clone()).or_insert_with(|| {
+            self.order.push(key);
+            Vec::new()
+        });
+        entry.push(row.row);
+        Ok(())
+    }
 }
 
 pub trait SourcePlugin {
@@ -120,7 +182,23 @@ pub trait SourcePlugin {
         ctx: &RunContext,
     ) -> Result<Vec<DiscoveredArtifact>>;
     fn fetch(&self, artifact: &DiscoveredArtifact, ctx: &RunContext) -> Result<LocalArtifact>;
-    fn parse(&self, artifact: &LocalArtifact, ctx: &RunContext) -> Result<ParseResult>;
+    fn inspect_parse(&self, artifact: &LocalArtifact, ctx: &RunContext) -> Result<ParseResult>;
+    fn stream_parse(
+        &self,
+        artifact: &LocalArtifact,
+        ctx: &RunContext,
+        sink: &mut dyn RawTableRowSink,
+    ) -> Result<()>;
+    fn parse(&self, artifact: &LocalArtifact, ctx: &RunContext) -> Result<ParseResult> {
+        let mut collector = CollectingRawTableRowSink::default();
+        let inspected = self.inspect_parse(artifact, ctx)?;
+        self.stream_parse(artifact, ctx, &mut collector)?;
+        Ok(ParseResult {
+            observed_schemas: inspected.observed_schemas,
+            raw_outputs: collector.into_raw_outputs(),
+            promotions: inspected.promotions,
+        })
+    }
     fn promotion_plan(&self) -> &'static [PromotionSpec];
 
     fn completion_for_collection(&self, collection_id: &str) -> Option<CollectionCompletion> {

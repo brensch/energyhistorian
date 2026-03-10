@@ -1,21 +1,35 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use csv::StringRecord;
 use ingest_core::{
     ColumnTypeInference, LocalArtifact, LogicalTableId, ObservedSchema, ParseResult,
-    PromotionMapping, RawTableChunk, SchemaApprovalStatus, SchemaColumn, SchemaVersionKey,
+    PromotionMapping, RawTableChunk, RawTableRow, RawTableRowSink, SchemaApprovalStatus,
+    SchemaColumn, SchemaVersionKey,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering;
-use std::path::Path;
 use zip::ZipArchive;
 
-pub fn parse_local_archive(artifact: &LocalArtifact, _parsed_dir: &Path) -> Result<ParseResult> {
+type RecordKey = (String, String, String);
+
+#[derive(Debug, Clone)]
+pub struct ArchiveParsePlan {
+    pub observed_schemas: Vec<ObservedSchema>,
+    pub raw_outputs: Vec<RawTableChunk>,
+    source_id: String,
+    headers_by_key: HashMap<RecordKey, Vec<String>>,
+    schema_hash_by_key: HashMap<RecordKey, String>,
+    key_order: Vec<RecordKey>,
+    csv_name: String,
+}
+
+pub fn inspect_local_archive(artifact: &LocalArtifact) -> Result<ArchiveParsePlan> {
     let file = File::open(&artifact.local_path)
         .with_context(|| format!("opening {}", artifact.local_path.display()))?;
     let mut zip = ZipArchive::new(BufReader::new(file))
@@ -26,16 +40,15 @@ pub fn parse_local_archive(artifact: &LocalArtifact, _parsed_dir: &Path) -> Resu
 
     let entry = zip.by_index(0)?;
     let csv_name = entry.name().to_string();
-
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .from_reader(BufReader::new(entry));
 
-    let mut headers_by_key = HashMap::<(String, String, String), Vec<String>>::new();
-    let mut key_order = Vec::<(String, String, String)>::new();
-    let mut inference_by_key = HashMap::<(String, String, String), ColumnTypeInference>::new();
-    let mut pending_outputs = Vec::<PendingRawOutput>::new();
+    let mut headers_by_key = HashMap::<RecordKey, Vec<String>>::new();
+    let mut key_order = Vec::<RecordKey>::new();
+    let mut inference_by_key = HashMap::<RecordKey, ColumnTypeInference>::new();
+    let mut row_count_by_key = HashMap::<RecordKey, usize>::new();
 
     for row in reader.records() {
         let record = row?;
@@ -71,48 +84,103 @@ pub fn parse_local_archive(artifact: &LocalArtifact, _parsed_dir: &Path) -> Resu
                     .entry(key.clone())
                     .or_insert_with(|| ColumnTypeInference::new(headers.len()))
                     .update(record.iter().skip(4));
-                let payload = record_to_json(
-                    &record,
-                    headers,
-                    artifact.metadata.source_id.as_str(),
-                    &csv_name,
-                    &artifact.metadata.acquisition_uri,
-                );
-                pending_outputs.push(PendingRawOutput { key, payload });
+                *row_count_by_key.entry(key).or_default() += 1;
             }
             _ => {}
         }
     }
 
     let mut observed_schemas = Vec::<ObservedSchema>::new();
-    let mut schema_hash_by_key = HashMap::<(String, String, String), String>::new();
-    for key in key_order {
+    let mut schema_hash_by_key = HashMap::<RecordKey, String>::new();
+    let mut raw_outputs = Vec::<RawTableChunk>::new();
+    for key in &key_order {
         let headers = headers_by_key
-            .get(&key)
+            .get(key)
             .ok_or_else(|| anyhow!("missing headers for {:?}", key))?;
         let inferred_types = inference_by_key
-            .get(&key)
+            .get(key)
             .map(ColumnTypeInference::inferred_clickhouse_types)
             .unwrap_or_else(|| vec!["Nullable(Float64)".to_string(); headers.len()]);
-        let schema = observed_schema_from_header(artifact, &key, headers, &inferred_types)?;
-        schema_hash_by_key.insert(key, schema.schema_key.header_hash.clone());
+        let schema = observed_schema_from_header(artifact, key, headers, &inferred_types)?;
+        let schema_key = schema.schema_key.header_hash.clone();
+        let row_count = row_count_by_key.get(key).copied().unwrap_or_default();
+        schema_hash_by_key.insert(key.clone(), schema_key.clone());
         observed_schemas.push(schema);
+        if row_count > 0 {
+            raw_outputs.push(RawTableChunk {
+                logical_table_key: logical_table_key(
+                    &artifact.metadata.source_id,
+                    &key.0,
+                    &key.1,
+                    &key.2,
+                ),
+                schema_key,
+                row_count,
+                rows: Vec::new(),
+            });
+        }
     }
 
-    let mut rows_by_output = HashMap::<((String, String, String), String), Vec<Value>>::new();
-    for pending in pending_outputs {
-        let schema_key = schema_hash_by_key
-            .get(&pending.key)
-            .ok_or_else(|| anyhow!("missing schema hash for {:?}", pending.key))?;
-        rows_by_output
-            .entry((pending.key, schema_key.clone()))
-            .or_default()
-            .push(pending.payload);
+    Ok(ArchiveParsePlan {
+        observed_schemas,
+        raw_outputs,
+        source_id: artifact.metadata.source_id.clone(),
+        headers_by_key,
+        schema_hash_by_key,
+        key_order,
+        csv_name,
+    })
+}
+
+pub fn parse_local_archive(artifact: &LocalArtifact, _parsed_dir: &Path) -> Result<ParseResult> {
+    let plan = inspect_local_archive(artifact)?;
+    let mut sink = MaterializingRowSink::default();
+    stream_local_archive_rows(artifact, &plan, &mut sink)?;
+    Ok(ParseResult {
+        observed_schemas: plan.observed_schemas.clone(),
+        raw_outputs: sink.into_raw_outputs(&plan),
+        promotions: Vec::<PromotionMapping>::new(),
+    })
+}
+
+pub fn stream_local_archive_rows(
+    artifact: &LocalArtifact,
+    plan: &ArchiveParsePlan,
+    sink: &mut dyn RawTableRowSink,
+) -> Result<()> {
+    let file = File::open(&artifact.local_path)
+        .with_context(|| format!("opening {}", artifact.local_path.display()))?;
+    let mut zip = ZipArchive::new(BufReader::new(file))
+        .with_context(|| format!("opening ZIP archive {}", artifact.local_path.display()))?;
+    if zip.is_empty() {
+        bail!("archive {} is empty", artifact.local_path.display());
     }
 
-    let mut raw_outputs = Vec::<RawTableChunk>::new();
-    for ((key, schema_key), rows) in rows_by_output {
-        raw_outputs.push(RawTableChunk {
+    let entry = zip.by_index(0)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(BufReader::new(entry));
+
+    for row in reader.records() {
+        let record = row?;
+        if record.is_empty() || record.get(0) != Some("D") {
+            continue;
+        }
+
+        let Some(key) = record_key(&record) else {
+            continue;
+        };
+        let headers = plan
+            .headers_by_key
+            .get(&key)
+            .ok_or_else(|| anyhow!("data row before header for {:?}", key))?;
+        let schema_key = plan
+            .schema_hash_by_key
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing schema hash for {:?}", key))?;
+        sink.accept(RawTableRow {
             logical_table_key: logical_table_key(
                 &artifact.metadata.source_id,
                 &key.0,
@@ -120,20 +188,22 @@ pub fn parse_local_archive(artifact: &LocalArtifact, _parsed_dir: &Path) -> Resu
                 &key.2,
             ),
             schema_key,
-            rows,
-        });
+            row: record_to_json(
+                &record,
+                headers,
+                artifact.metadata.source_id.as_str(),
+                &plan.csv_name,
+                &artifact.metadata.acquisition_uri,
+            ),
+        })?;
     }
 
-    Ok(ParseResult {
-        observed_schemas,
-        raw_outputs,
-        promotions: Vec::<PromotionMapping>::new(),
-    })
+    Ok(())
 }
 
 fn observed_schema_from_header(
     artifact: &LocalArtifact,
-    key: &(String, String, String),
+    key: &RecordKey,
     headers: &[String],
     inferred_types: &[String],
 ) -> Result<ObservedSchema> {
@@ -173,7 +243,7 @@ fn observed_schema_from_header(
     })
 }
 
-fn record_key(record: &StringRecord) -> Option<(String, String, String)> {
+fn record_key(record: &StringRecord) -> Option<RecordKey> {
     Some((
         record.get(1)?.to_string(),
         record.get(2)?.to_string(),
@@ -197,7 +267,7 @@ pub fn sanitize_logical_table_key(logical_table_key: &str) -> String {
         .replace(['/', '-'], "_")
 }
 
-fn typed_schema_hash(key: &(String, String, String), columns: &[SchemaColumn]) -> String {
+fn typed_schema_hash(key: &RecordKey, columns: &[SchemaColumn]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.0.as_bytes());
     hasher.update(b"|");
@@ -227,11 +297,6 @@ fn typed_schema_hash(key: &(String, String, String), columns: &[SchemaColumn]) -
         hasher.update(b",");
     }
     format!("{:x}", hasher.finalize())
-}
-
-struct PendingRawOutput {
-    key: (String, String, String),
-    payload: Value,
 }
 
 fn record_to_json(
@@ -272,4 +337,47 @@ fn parse_scalar(value: &str) -> Value {
         return json!(float);
     }
     Value::String(trimmed.to_string())
+}
+
+#[derive(Default)]
+struct MaterializingRowSink {
+    order: Vec<(String, String)>,
+    rows_by_output: HashMap<(String, String), Vec<Value>>,
+}
+
+impl RawTableRowSink for MaterializingRowSink {
+    fn accept(&mut self, row: RawTableRow) -> Result<()> {
+        let key = (row.logical_table_key, row.schema_key);
+        let entry = self.rows_by_output.entry(key.clone()).or_insert_with(|| {
+            self.order.push(key);
+            Vec::new()
+        });
+        entry.push(row.row);
+        Ok(())
+    }
+}
+
+impl MaterializingRowSink {
+    fn into_raw_outputs(self, plan: &ArchiveParsePlan) -> Vec<RawTableChunk> {
+        let mut rows_by_output = self.rows_by_output;
+        let mut raw_outputs = Vec::new();
+
+        for key in &plan.key_order {
+            let logical_table_key = logical_table_key(&plan.source_id, &key.0, &key.1, &key.2);
+            let Some(schema_key) = plan.schema_hash_by_key.get(key).cloned() else {
+                continue;
+            };
+            let output_key = (logical_table_key.clone(), schema_key.clone());
+            if let Some(rows) = rows_by_output.remove(&output_key) {
+                raw_outputs.push(RawTableChunk {
+                    logical_table_key,
+                    schema_key,
+                    row_count: rows.len(),
+                    rows,
+                });
+            }
+        }
+
+        raw_outputs
+    }
 }

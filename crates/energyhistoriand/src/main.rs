@@ -122,6 +122,10 @@ async fn main() -> Result<()> {
     let schedule_seeds = build_schedule_seeds(&source_plans);
     let synced = schedule_state::sync_collection_schedules(&db, &schedule_seeds);
     info!("synced collection schedule state rows={synced}");
+    let smeared = schedule_state::smear_queued_discovery_tasks(&db, &schedule_seeds);
+    if smeared > 0 {
+        info!("smeared queued discovery tasks count={smeared}");
+    }
     let recovered = pipeline::requeue_unpublished_artifacts(&db);
     if recovered > 0 {
         info!("requeued unpublished artifacts count={recovered}");
@@ -460,6 +464,11 @@ fn build_schedule_seeds(
                     source_id: source.descriptor.source_id.clone(),
                     collection_id: collection.id.clone(),
                     poll_interval_seconds: collection.default_poll_interval_seconds,
+                    stagger_offset_seconds: schedule_state::stable_stagger_offset_seconds(
+                        &source.descriptor.source_id,
+                        &collection.id,
+                        collection.default_poll_interval_seconds,
+                    ),
                     scheduler_enabled: source.descriptor.source_id == "aemo.nemweb",
                 })
         })

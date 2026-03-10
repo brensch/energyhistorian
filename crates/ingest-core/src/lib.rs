@@ -12,8 +12,8 @@ pub mod type_inference;
 pub use artifact::{ArtifactId, ArtifactKind, ArtifactMetadata, DiscoveredArtifact, LocalArtifact};
 pub use plugin::{
     CollectionCompletion, CompletionUnit, DiscoveryRequest, ParseResult, PluginCapabilities,
-    PromotionSpec, RawTableChunk, RunContext, SourceCollection, SourceMetadataDocument,
-    SourcePlugin, TaskBlueprint, TaskKind,
+    PromotionSpec, RawTableChunk, RawTableRow, RawTableRowSink, RunContext, SourceCollection,
+    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 pub use promotion::{CanonicalDataset, PromotionMapping, PromotionMode};
 pub use raw_storage::{RawTablePlan, physical_raw_table_name, plan_raw_table};

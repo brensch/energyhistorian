@@ -1,22 +1,25 @@
 //! Background scheduler: claims tasks from SQLite, dispatches to source
 //! plugins, and hands results to the pipeline for recording.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, DiscoveredArtifact, FileSchemaRegistry, LocalArtifact,
+    ObservedSchema, RawTableRow, RawTableRowSink, RunContext, SourcePlugin,
 };
 use rusqlite::Connection;
 use source_nemweb::NemwebPlugin;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::pipeline;
 use crate::schedule_state::{self, CollectionScheduleSeed};
-use crate::warehouse::{ClickHouseConfig, ClickHousePublisher};
+use crate::warehouse::{ClickHouseConfig, ClickHousePublisher, MAX_INSERT_BYTES, MAX_INSERT_ROWS};
 
 const LEASE_SECS: i64 = 300;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -137,6 +140,7 @@ async fn tick(
                     error!(task_id = %task.task_id, error = %msg, "task failed");
                     mark_failed(
                         &db2,
+                        &schedule_seeds2,
                         &task.task_id,
                         &task.source_id,
                         &task.collection_id,
@@ -272,6 +276,7 @@ fn mark_completed(db: &Arc<Mutex<Connection>>, task_id: &str, message: &str) {
 
 fn mark_failed(
     db: &Arc<Mutex<Connection>>,
+    schedule_seeds: &[CollectionScheduleSeed],
     task_id: &str,
     source_id: &str,
     collection_id: &str,
@@ -281,7 +286,13 @@ fn mark_failed(
 ) {
     let conn = db.lock().expect("mutex");
     if attempts < MAX_RETRIES {
-        let retry_at = (Utc::now() + chrono::Duration::seconds(RETRY_DELAY_SECS)).to_rfc3339();
+        let retry_at = retry_at_for_task(
+            schedule_seeds,
+            source_id,
+            collection_id,
+            task_kind,
+            Utc::now(),
+        );
         conn.execute(
             "UPDATE tasks SET status = 'queued', available_at = ?1, \
              message = ?2, lease_owner = NULL, lease_expires_at = NULL \
@@ -364,14 +375,10 @@ async fn exec_discover(
     let conn = db.lock().expect("mutex");
     let outcome =
         pipeline::record_discoveries(&conn, &task.source_id, &task.collection_id, &discoveries);
-    let poll_delay_secs =
-        collection_poll_interval_secs(schedule_seeds, &task.source_id, &task.collection_id);
-    let scheduled = pipeline::schedule_next_discovery(
-        &conn,
-        &task.source_id,
-        &task.collection_id,
-        poll_delay_secs,
-    );
+    let next_run_at =
+        collection_next_discovery_at(schedule_seeds, &task.source_id, &task.collection_id);
+    let scheduled =
+        pipeline::schedule_next_discovery(&conn, &task.source_id, &task.collection_id, &next_run_at);
     schedule_state::note_discover_scheduled(
         &conn,
         &task.source_id,
@@ -448,7 +455,7 @@ async fn exec_parse(
     task: &TaskRow,
     nemweb: &NemwebPlugin,
     db: &Arc<Mutex<Connection>>,
-    parsed_dir: &Path,
+    _parsed_dir: &Path,
     schema_dir: &Path,
     publisher: &ClickHousePublisher,
 ) -> Result<String> {
@@ -457,8 +464,18 @@ async fn exec_parse(
     let local_path = require_str(&payload, "local_path")?;
     let remote_uri = payload["remote_uri"].as_str().unwrap_or("");
 
+    let ctx = RunContext {
+        run_id: format!(
+            "parse-{}-{}",
+            task.collection_id,
+            Utc::now().timestamp_millis()
+        ),
+        environment: "service".to_string(),
+        parser_version: "source-nemweb/0.1".to_string(),
+    };
+
     // Source-specific: parse the artifact
-    let result = match task.source_id.as_str() {
+    let (artifact, result) = match task.source_id.as_str() {
         "aemo.nemweb" => {
             let artifact = LocalArtifact {
                 metadata: ArtifactMetadata {
@@ -477,25 +494,45 @@ async fn exec_parse(
                 },
                 local_path: PathBuf::from(local_path),
             };
-            let dir = parsed_dir.join(&task.collection_id);
-            std::fs::create_dir_all(&dir)?;
-            nemweb
-                .parse_artifact(&artifact, &dir)
-                .context("parsing archive")?
+            let inspected = nemweb
+                .inspect_parse(&artifact, &ctx)
+                .context("inspecting archive for schemas and counts")?;
+            (artifact, inspected)
         }
         src => anyhow::bail!("no parse implementation for source '{src}'"),
     };
 
-    let published_rows = publisher
-        .publish_parse_result(
-            &task.source_id,
-            &task.collection_id,
-            artifact_id,
-            remote_uri,
-            &result,
-        )
+    publisher
+        .ensure_tables(&result.observed_schemas)
         .await
-        .context("publishing parsed rows to clickhouse")?;
+        .context("preparing clickhouse raw tables")?;
+
+    let (tx, mut rx) = mpsc::channel::<RawTableRow>(64);
+    let artifact2 = artifact.clone();
+    let ctx2 = ctx.clone();
+    let nemweb2 = nemweb.clone();
+    let parse_handle = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut sink = ChannelRawTableRowSink { tx };
+        nemweb2
+            .stream_parse(&artifact2, &ctx2, &mut sink)
+            .context("streaming parsed rows")
+    });
+
+    let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let mut batcher = ClickHouseRowBatcher::new(
+        publisher,
+        &result.observed_schemas,
+        &task.source_id,
+        &task.collection_id,
+        artifact_id,
+        remote_uri,
+        processed_at,
+    );
+    while let Some(row) = rx.recv().await {
+        batcher.push(row).await?;
+    }
+    parse_handle.await.context("joining parser stream task")??;
+    let published_rows = batcher.finish().await?;
 
     // Generic: record schemas and update status
     let registry = FileSchemaRegistry::new(schema_dir.join("nemweb.schemas.json"));
@@ -518,6 +555,129 @@ async fn exec_parse(
 // Helpers
 // ---------------------------------------------------------------------------
 
+struct ChannelRawTableRowSink {
+    tx: mpsc::Sender<RawTableRow>,
+}
+
+impl RawTableRowSink for ChannelRawTableRowSink {
+    fn accept(&mut self, row: RawTableRow) -> Result<()> {
+        self.tx
+            .blocking_send(row)
+            .map_err(|_| anyhow!("row stream channel closed while parsing"))
+    }
+}
+
+struct PendingInsertChunk {
+    logical_table_key: String,
+    schema_key: String,
+    rows: Vec<serde_json::Value>,
+    encoded_bytes: usize,
+}
+
+struct ClickHouseRowBatcher<'a> {
+    publisher: &'a ClickHousePublisher,
+    schemas_by_hash: HashMap<String, ObservedSchema>,
+    source_id: &'a str,
+    collection_id: &'a str,
+    artifact_id: &'a str,
+    remote_uri: &'a str,
+    processed_at: String,
+    pending: HashMap<(String, String), PendingInsertChunk>,
+    published_rows: usize,
+}
+
+impl<'a> ClickHouseRowBatcher<'a> {
+    fn new(
+        publisher: &'a ClickHousePublisher,
+        schemas: &[ObservedSchema],
+        source_id: &'a str,
+        collection_id: &'a str,
+        artifact_id: &'a str,
+        remote_uri: &'a str,
+        processed_at: String,
+    ) -> Self {
+        Self {
+            publisher,
+            schemas_by_hash: schemas
+                .iter()
+                .map(|schema| (schema.schema_key.header_hash.clone(), schema.clone()))
+                .collect(),
+            source_id,
+            collection_id,
+            artifact_id,
+            remote_uri,
+            processed_at,
+            pending: HashMap::new(),
+            published_rows: 0,
+        }
+    }
+
+    async fn push(&mut self, row: RawTableRow) -> Result<()> {
+        let encoded_len = serde_json::to_string(&row.row)?.len() + 1;
+        let key = (row.logical_table_key.clone(), row.schema_key.clone());
+        if let Some(existing) = self.pending.get(&key) {
+            let would_exceed_rows = existing.rows.len() >= MAX_INSERT_ROWS;
+            let would_exceed_bytes = !existing.rows.is_empty()
+                && existing.encoded_bytes + encoded_len > MAX_INSERT_BYTES;
+            if would_exceed_rows || would_exceed_bytes {
+                self.flush_key(&key).await?;
+            }
+        }
+
+        let entry = self
+            .pending
+            .entry(key.clone())
+            .or_insert_with(|| PendingInsertChunk {
+                logical_table_key: row.logical_table_key,
+                schema_key: row.schema_key,
+                rows: Vec::new(),
+                encoded_bytes: 0,
+            });
+        entry.encoded_bytes += encoded_len;
+        entry.rows.push(row.row);
+
+        if entry.rows.len() >= MAX_INSERT_ROWS || entry.encoded_bytes >= MAX_INSERT_BYTES {
+            self.flush_key(&key).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<usize> {
+        let keys = self.pending.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            self.flush_key(&key).await?;
+        }
+        Ok(self.published_rows)
+    }
+
+    async fn flush_key(&mut self, key: &(String, String)) -> Result<()> {
+        let Some(chunk) = self.pending.remove(key) else {
+            return Ok(());
+        };
+        if chunk.rows.is_empty() {
+            return Ok(());
+        }
+        let schema = self
+            .schemas_by_hash
+            .get(&chunk.schema_key)
+            .ok_or_else(|| anyhow!("missing schema for chunk {}", chunk.logical_table_key))?;
+        self.published_rows += self
+            .publisher
+            .publish_raw_chunk(
+                schema,
+                self.source_id,
+                self.collection_id,
+                self.artifact_id,
+                self.remote_uri,
+                &self.processed_at,
+                &chunk.rows,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 fn stable_artifact_id(source_id: &str, url: &str) -> String {
     let filename = url.rsplit('/').next().unwrap_or(url);
     let name = filename.strip_suffix(".zip").unwrap_or(filename);
@@ -538,15 +698,39 @@ fn require_str<'a>(payload: &'a serde_json::Value, field: &str) -> Result<&'a st
         .ok_or_else(|| anyhow::anyhow!("task payload missing required field '{field}'"))
 }
 
-fn collection_poll_interval_secs(
+fn collection_next_discovery_at(
     schedule_seeds: &[CollectionScheduleSeed],
     source_id: &str,
     collection_id: &str,
-) -> i64 {
-    schedule_seeds
+) -> String {
+    collection_next_discovery_at_from(schedule_seeds, source_id, collection_id, Utc::now())
+}
+
+fn collection_next_discovery_at_from(
+    schedule_seeds: &[CollectionScheduleSeed],
+    source_id: &str,
+    collection_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> String {
+    let seed = schedule_seeds
         .iter()
-        .find(|seed| seed.source_id == source_id && seed.collection_id == collection_id)
-        .and_then(|seed| seed.poll_interval_seconds)
-        .map(|secs| secs as i64)
-        .unwrap_or(DEFAULT_REDISCOVER_DELAY_SECS)
+        .find(|seed| seed.source_id == source_id && seed.collection_id == collection_id);
+    match seed {
+        Some(seed) => schedule_state::next_discovery_time(seed, now).to_rfc3339(),
+        None => (now + chrono::Duration::seconds(DEFAULT_REDISCOVER_DELAY_SECS)).to_rfc3339(),
+    }
+}
+
+fn retry_at_for_task(
+    schedule_seeds: &[CollectionScheduleSeed],
+    source_id: &str,
+    collection_id: &str,
+    task_kind: &str,
+    now: chrono::DateTime<Utc>,
+) -> String {
+    if task_kind == "discover" {
+        return collection_next_discovery_at_from(schedule_seeds, source_id, collection_id, now);
+    }
+
+    (now + chrono::Duration::seconds(RETRY_DELAY_SECS)).to_rfc3339()
 }

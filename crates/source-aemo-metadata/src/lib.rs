@@ -2,9 +2,9 @@ use anyhow::{Result, bail};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, CollectionCompletion, CompletionUnit, DiscoveredArtifact,
-    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec, RunContext,
-    SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint,
-    TaskKind,
+    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec,
+    RawTableRowSink, RunContext, SourceCollection, SourceDescriptor, SourceMetadataDocument,
+    SourcePlugin, TaskBlueprint, TaskKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -255,8 +255,17 @@ impl SourcePlugin for AemoMetadataPlugin {
         bail!("Metadata fetch/parser implementation still needs to be built")
     }
 
-    fn parse(&self, _artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
+    fn inspect_parse(&self, _artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
         bail!("Metadata normalization is the next major implementation step")
+    }
+
+    fn stream_parse(
+        &self,
+        _artifact: &LocalArtifact,
+        _ctx: &RunContext,
+        _sink: &mut dyn RawTableRowSink,
+    ) -> Result<()> {
+        bail!("Metadata normalization should stream rows through the shared ingestion contract")
     }
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {

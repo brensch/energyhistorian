@@ -4,8 +4,8 @@ use ingest_core::{ObservedSchema, ParseResult, plan_raw_table};
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
 
-const MAX_INSERT_ROWS: usize = 10_000;
-const MAX_INSERT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_INSERT_ROWS: usize = 10_000;
+pub(crate) const MAX_INSERT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ClickHouseConfig {
@@ -36,6 +36,7 @@ impl ClickHousePublisher {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn publish_parse_result(
         &self,
         source_id: &str,
@@ -50,9 +51,7 @@ impl ClickHousePublisher {
             .map(|schema| (schema.schema_key.header_hash.clone(), schema))
             .collect::<std::collections::HashMap<_, _>>();
 
-        for schema in &result.observed_schemas {
-            self.ensure_table(schema).await?;
-        }
+        self.ensure_tables(&result.observed_schemas).await?;
 
         let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
         let mut rows_written = 0usize;
@@ -62,22 +61,59 @@ impl ClickHousePublisher {
                 .copied()
                 .ok_or_else(|| anyhow!("missing schema for chunk {}", chunk.schema_key))?;
             if chunk.rows.is_empty() {
+                if chunk.row_count() > 0 {
+                    bail!(
+                        "chunk {} has row_count={} but no rows; use the streaming publish path",
+                        chunk.logical_table_key,
+                        chunk.row_count()
+                    );
+                }
                 continue;
             }
-            self.insert_chunk(
-                schema,
-                source_id,
-                collection_id,
-                artifact_id,
-                remote_uri,
-                &processed_at,
-                &chunk.rows,
-            )
-            .await?;
-            rows_written += chunk.rows.len();
+            rows_written += self
+                .publish_raw_chunk(
+                    schema,
+                    source_id,
+                    collection_id,
+                    artifact_id,
+                    remote_uri,
+                    &processed_at,
+                    &chunk.rows,
+                )
+                .await?;
         }
 
         Ok(rows_written)
+    }
+
+    pub async fn ensure_tables(&self, schemas: &[ObservedSchema]) -> Result<()> {
+        for schema in schemas {
+            self.ensure_table(schema).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn publish_raw_chunk(
+        &self,
+        schema: &ObservedSchema,
+        source_id: &str,
+        collection_id: &str,
+        artifact_id: &str,
+        remote_uri: &str,
+        processed_at: &str,
+        rows: &[Value],
+    ) -> Result<usize> {
+        self.insert_chunk(
+            schema,
+            source_id,
+            collection_id,
+            artifact_id,
+            remote_uri,
+            processed_at,
+            rows,
+        )
+        .await?;
+        Ok(rows.len())
     }
 
     async fn ensure_table(&self, schema: &ObservedSchema) -> Result<()> {
@@ -363,6 +399,7 @@ mod tests {
             raw_outputs: vec![RawTableChunk {
                 logical_table_key: "AEMO.NEMWEB/TEST/PRICE/1".to_string(),
                 schema_key: schema.schema_key.header_hash.clone(),
+                row_count: 2,
                 rows: vec![
                     json!({
                         "_archive_entry": "sample.csv",
