@@ -1,10 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use ingest_core::{ArtifactKind, ArtifactMetadata, DiscoveredArtifact, RunContext};
+use ingest_core::{ArtifactKind, ArtifactMetadata, DiscoveredArtifact, RunContext, SourceFamily};
 use reqwest::Url;
 use scraper::{Html, Selector};
-
-use crate::families::SourceFamily;
 
 pub async fn discover_recent_archives(
     client: &reqwest::Client,
@@ -13,12 +11,12 @@ pub async fn discover_recent_archives(
     ctx: &RunContext,
 ) -> Result<Vec<DiscoveredArtifact>> {
     let html = client
-        .get(family.current_reports_url)
+        .get(&family.listing_url)
         .send()
         .await
-        .with_context(|| format!("fetching listing {}", family.current_reports_url))?
+        .with_context(|| format!("fetching listing {}", family.listing_url))?
         .error_for_status()
-        .with_context(|| format!("listing request failed for {}", family.current_reports_url))?
+        .with_context(|| format!("listing request failed for {}", family.listing_url))?
         .text()
         .await?;
 
@@ -33,7 +31,7 @@ fn discover_recent_archives_from_html(
 ) -> Result<Vec<DiscoveredArtifact>> {
     let document = Html::parse_document(html);
     let selector = Selector::parse("a").map_err(|_| anyhow!("failed to parse selector"))?;
-    let base = Url::parse(family.current_reports_url)?;
+    let base = Url::parse(&family.listing_url)?;
 
     let mut links = document
         .select(&selector)

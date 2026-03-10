@@ -5,6 +5,7 @@ pub mod raw_storage;
 pub mod registry;
 pub mod schema;
 pub mod schema_registry;
+pub mod source_family;
 pub mod state;
 pub mod type_inference;
 
@@ -22,5 +23,6 @@ pub use schema::{
     SchemaVersionKey,
 };
 pub use schema_registry::{FileSchemaRegistry, SchemaRegistrationOutcome};
+pub use source_family::{SourceFamily, SourceFamilyCatalogEntry};
 pub use state::{ArtifactProcessingStatus, ProcessingCheckpoint, ProcessingEvent};
 pub use type_inference::ColumnTypeInference;

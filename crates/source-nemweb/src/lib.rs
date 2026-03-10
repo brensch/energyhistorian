@@ -11,11 +11,10 @@ use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, CollectionCompletion, CompletionUnit, DiscoveredArtifact,
     DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec, RunContext,
-    SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint,
-    TaskKind,
+    SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument,
+    SourcePlugin, TaskBlueprint, TaskKind,
 };
 
-pub use families::{SourceFamily, SourceFamilyCatalogEntry};
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
 
 #[derive(Clone)]
@@ -49,7 +48,7 @@ impl NemwebPlugin {
             environment: "service".to_string(),
             parser_version: "source-nemweb/0.1".to_string(),
         };
-        discover::discover_recent_archives(client, family, limit, &ctx).await
+        discover::discover_recent_archives(client, &family, limit, &ctx).await
     }
 
     /// Fetch a single discovered artifact archive.
@@ -196,7 +195,7 @@ impl SourcePlugin for NemwebPlugin {
                 metadata: ArtifactMetadata {
                     artifact_id: format!("{}-{}-{}", family.id, ctx.run_id, idx),
                     source_id: family.id.to_string(),
-                    acquisition_uri: family.current_reports_url.to_string(),
+                    acquisition_uri: family.listing_url.to_string(),
                     discovered_at: Utc::now(),
                     fetched_at: None,
                     published_at: None,

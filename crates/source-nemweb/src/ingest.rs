@@ -62,9 +62,9 @@ pub async fn ingest_recent(
         .build()
         .context("building HTTP client")?;
 
-    let discovered = discover_recent_archives(&client, family, limit, &ctx).await?;
-    let source_raw_dir = raw_dir.join(family.id);
-    let source_parsed_dir = parsed_dir.join(family.id);
+    let discovered = discover_recent_archives(&client, &family, limit, &ctx).await?;
+    let source_raw_dir = raw_dir.join(&family.id);
+    let source_parsed_dir = parsed_dir.join(&family.id);
     fs::create_dir_all(&source_raw_dir)?;
     fs::create_dir_all(&source_parsed_dir)?;
 
@@ -111,8 +111,8 @@ pub async fn ingest_recent(
     tables.sort_by(|a, b| a.output_name.cmp(&b.output_name));
 
     Ok(NemwebIngestResult {
-        source_family: family.id.to_string(),
-        source_url: family.current_reports_url.to_string(),
+        source_family: family.id,
+        source_url: family.listing_url,
         fetched_at_utc: Utc::now().to_rfc3339(),
         archives,
         tables,

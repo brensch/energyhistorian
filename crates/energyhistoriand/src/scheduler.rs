@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, DiscoveredArtifact, FileSchemaRegistry, LocalArtifact,
+    SourcePlugin,
 };
 use rusqlite::Connection;
 use source_nemweb::NemwebPlugin;
@@ -22,7 +23,7 @@ const MAX_CONCURRENT: usize = 8;
 const DISCOVER_LIMIT: usize = 10;
 const MAX_RETRIES: i64 = 3;
 const RETRY_DELAY_SECS: i64 = 30;
-const REDISCOVER_DELAY_SECS: i64 = 900;
+const DEFAULT_REDISCOVER_DELAY_SECS: i64 = 900;
 
 #[derive(Debug, Clone)]
 struct TaskRow {
@@ -287,12 +288,9 @@ async fn exec_discover(
     let conn = db.lock().expect("mutex");
     let outcome =
         pipeline::record_discoveries(&conn, &task.source_id, &task.collection_id, &discoveries);
-    pipeline::schedule_next_discovery(
-        &conn,
-        &task.source_id,
-        &task.collection_id,
-        REDISCOVER_DELAY_SECS,
-    );
+    let poll_delay_secs =
+        collection_poll_interval_secs(nemweb, &task.source_id, &task.collection_id);
+    pipeline::schedule_next_discovery(&conn, &task.source_id, &task.collection_id, poll_delay_secs);
 
     Ok(outcome.to_string())
 }
@@ -451,4 +449,21 @@ fn require_str<'a>(payload: &'a serde_json::Value, field: &str) -> Result<&'a st
     payload[field]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("task payload missing required field '{field}'"))
+}
+
+fn collection_poll_interval_secs(
+    nemweb: &NemwebPlugin,
+    source_id: &str,
+    collection_id: &str,
+) -> i64 {
+    match source_id {
+        "aemo.nemweb" => nemweb
+            .collections()
+            .into_iter()
+            .find(|collection| collection.id == collection_id)
+            .and_then(|collection| collection.default_poll_interval_seconds)
+            .map(|secs| secs as i64)
+            .unwrap_or(DEFAULT_REDISCOVER_DELAY_SECS),
+        _ => DEFAULT_REDISCOVER_DELAY_SECS,
+    }
 }
