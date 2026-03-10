@@ -226,20 +226,26 @@ pub fn record_fetch(
     )
     .ok();
 
-    let parse_id = format!("{source_id}:{collection_id}:parse:{artifact_id}");
-    let payload = serde_json::json!({
-        "artifact_id": artifact_id,
-        "remote_uri": remote_uri,
-        "local_path": local.local_path.display().to_string(),
-    });
-    let created = enqueue_task(
+    conn.execute(
+        "INSERT OR IGNORE INTO artifact_publications \
+         (artifact_id, source_id, collection_id, status, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, 'pending', ?4, ?4)",
+        rusqlite::params![
+            artifact_id,
+            source_id,
+            collection_id,
+            Utc::now().to_rfc3339(),
+        ],
+    )
+    .ok();
+
+    let created = enqueue_parse_task(
         conn,
-        &parse_id,
         source_id,
         collection_id,
-        "parse",
         artifact_id,
-        &payload,
+        remote_uri,
+        &local.local_path.display().to_string(),
     );
 
     FetchOutcome {
@@ -251,6 +257,8 @@ pub fn record_fetch(
 /// Register schemas from a parse result and update artifact status.
 pub fn record_parse(
     conn: &Connection,
+    source_id: &str,
+    collection_id: &str,
     artifact_id: &str,
     result: &ParseResult,
     schema_registry: &FileSchemaRegistry,
@@ -267,8 +275,26 @@ pub fn record_parse(
     let total_rows: usize = result.raw_outputs.iter().map(|o| o.rows.len()).sum();
 
     conn.execute(
-        "UPDATE discovered_artifacts SET status = 'parsed' WHERE artifact_id = ?1",
-        rusqlite::params![artifact_id],
+        "UPDATE discovered_artifacts SET status = 'published', published_at = ?1 WHERE artifact_id = ?2",
+        rusqlite::params![Utc::now().to_rfc3339(), artifact_id],
+    )
+    .ok();
+
+    conn.execute(
+        "INSERT INTO artifact_publications \
+         (artifact_id, source_id, collection_id, status, created_at, updated_at, published_at) \
+         VALUES (?1, ?2, ?3, 'published', ?4, ?4, ?4) \
+         ON CONFLICT(artifact_id) DO UPDATE SET \
+             status = excluded.status, \
+             updated_at = excluded.updated_at, \
+             published_at = excluded.published_at, \
+             last_error = NULL",
+        rusqlite::params![
+            artifact_id,
+            source_id,
+            collection_id,
+            Utc::now().to_rfc3339(),
+        ],
     )
     .ok();
 
@@ -279,6 +305,48 @@ pub fn record_parse(
         registry_inserted: reg.inserted,
         registry_updated: reg.updated_last_seen,
     })
+}
+
+pub fn requeue_unpublished_artifacts(conn: &Connection) -> usize {
+    let mut stmt = match conn.prepare(
+        "SELECT d.artifact_id, d.source_id, d.collection_id, d.remote_uri, f.local_path \
+         FROM discovered_artifacts d \
+         JOIN fetched_artifacts f ON f.artifact_id = d.artifact_id \
+         LEFT JOIN artifact_publications p ON p.artifact_id = d.artifact_id \
+         WHERE d.status IN ('fetched', 'parsed') \
+           AND COALESCE(p.status, 'pending') != 'published'",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return 0,
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return 0,
+    };
+
+    let mut requeued = 0;
+    for row in rows.flatten() {
+        let (artifact_id, source_id, collection_id, remote_uri, local_path) = row;
+        requeued += enqueue_parse_task(
+            conn,
+            &source_id,
+            &collection_id,
+            &artifact_id,
+            &remote_uri,
+            &local_path,
+        );
+    }
+
+    requeued
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +376,31 @@ fn enqueue_task(
         ],
     )
     .unwrap_or(0)
+}
+
+fn enqueue_parse_task(
+    conn: &Connection,
+    source_id: &str,
+    collection_id: &str,
+    artifact_id: &str,
+    remote_uri: &str,
+    local_path: &str,
+) -> usize {
+    let parse_id = format!("{source_id}:{collection_id}:parse:{artifact_id}");
+    let payload = serde_json::json!({
+        "artifact_id": artifact_id,
+        "remote_uri": remote_uri,
+        "local_path": local_path,
+    });
+    enqueue_task(
+        conn,
+        &parse_id,
+        source_id,
+        collection_id,
+        "parse",
+        artifact_id,
+        &payload,
+    )
 }
 
 fn enqueue_task_delayed(

@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use source_nemweb::NemwebPlugin;
 
 use crate::pipeline;
+use crate::warehouse::{ClickHouseConfig, ClickHousePublisher};
 
 const LEASE_SECS: i64 = 300;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -38,6 +39,7 @@ pub async fn run(
     raw_dir: PathBuf,
     parsed_dir: PathBuf,
     schema_registry_dir: PathBuf,
+    clickhouse: ClickHouseConfig,
 ) {
     let worker_id = format!("w-{}", std::process::id());
     let client = reqwest::Client::builder()
@@ -45,6 +47,7 @@ pub async fn run(
         .timeout(Duration::from_secs(60))
         .build()
         .expect("build HTTP client");
+    let publisher = ClickHousePublisher::new(clickhouse).expect("build clickhouse publisher");
     let nemweb = NemwebPlugin::new();
 
     eprintln!("[scheduler] started id={worker_id}");
@@ -58,6 +61,7 @@ pub async fn run(
             &raw_dir,
             &parsed_dir,
             &schema_registry_dir,
+            &publisher,
         )
         .await
         {
@@ -75,6 +79,7 @@ async fn tick(
     raw_dir: &Path,
     parsed_dir: &Path,
     schema_dir: &Path,
+    publisher: &ClickHousePublisher,
 ) -> Result<()> {
     recover_expired_leases(db);
 
@@ -97,10 +102,20 @@ async fn tick(
         let raw2 = raw_dir.to_path_buf();
         let parsed2 = parsed_dir.to_path_buf();
         let schema2 = schema_dir.to_path_buf();
+        let publisher2 = publisher.clone();
 
         tokio::spawn(async move {
-            let result =
-                execute_task(&task, &client2, &nemweb2, &db2, &raw2, &parsed2, &schema2).await;
+            let result = execute_task(
+                &task,
+                &client2,
+                &nemweb2,
+                &db2,
+                &raw2,
+                &parsed2,
+                &schema2,
+                &publisher2,
+            )
+            .await;
 
             match result {
                 Ok(msg) => {
@@ -235,11 +250,12 @@ async fn execute_task(
     raw_dir: &Path,
     parsed_dir: &Path,
     schema_dir: &Path,
+    publisher: &ClickHousePublisher,
 ) -> Result<String> {
     match task.task_kind.as_str() {
         "discover" => exec_discover(task, client, nemweb, db).await,
         "fetch" => exec_fetch(task, client, nemweb, db, raw_dir).await,
-        "parse" => exec_parse(task, nemweb, db, parsed_dir, schema_dir),
+        "parse" => exec_parse(task, nemweb, db, parsed_dir, schema_dir, publisher).await,
         kind => anyhow::bail!("no executor for task kind '{kind}'"),
     }
 }
@@ -343,12 +359,13 @@ async fn exec_fetch(
     Ok(format!("{artifact_id}: {outcome}"))
 }
 
-fn exec_parse(
+async fn exec_parse(
     task: &TaskRow,
     nemweb: &NemwebPlugin,
     db: &Arc<Mutex<Connection>>,
     parsed_dir: &Path,
     schema_dir: &Path,
+    publisher: &ClickHousePublisher,
 ) -> Result<String> {
     let payload = parse_payload(&task.payload_json)?;
     let artifact_id = require_str(&payload, "artifact_id")?;
@@ -384,12 +401,32 @@ fn exec_parse(
         src => anyhow::bail!("no parse implementation for source '{src}'"),
     };
 
+    let published_rows = publisher
+        .publish_parse_result(
+            &task.source_id,
+            &task.collection_id,
+            artifact_id,
+            remote_uri,
+            &result,
+        )
+        .await
+        .context("publishing parsed rows to clickhouse")?;
+
     // Generic: record schemas and update status
     let registry = FileSchemaRegistry::new(schema_dir.join("nemweb.schemas.json"));
     let conn = db.lock().expect("mutex");
-    let outcome = pipeline::record_parse(&conn, artifact_id, &result, &registry)?;
+    let outcome = pipeline::record_parse(
+        &conn,
+        &task.source_id,
+        &task.collection_id,
+        artifact_id,
+        &result,
+        &registry,
+    )?;
 
-    Ok(format!("{artifact_id}: {outcome}"))
+    Ok(format!(
+        "{artifact_id}: {outcome}; clickhouse rows={published_rows}"
+    ))
 }
 
 // ---------------------------------------------------------------------------

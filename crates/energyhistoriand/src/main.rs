@@ -1,5 +1,6 @@
 mod pipeline;
 mod scheduler;
+mod warehouse;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use serde::Serialize;
 use source_aemo_dvd::AemoDvdPlugin;
 use source_aemo_metadata::AemoMetadataPlugin;
 use source_nemweb::NemwebPlugin;
+use warehouse::ClickHouseConfig;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "energyhistorian daemon service")]
@@ -26,6 +28,12 @@ struct Args {
     listen_addr: SocketAddr,
     #[arg(long, default_value = "data/control-plane.sqlite")]
     state_db: PathBuf,
+    #[arg(long, env = "CLICKHOUSE_URL", default_value = "http://127.0.0.1:8123")]
+    clickhouse_url: String,
+    #[arg(long, env = "CLICKHOUSE_USER", default_value = "energyhistorian")]
+    clickhouse_user: String,
+    #[arg(long, env = "CLICKHOUSE_PASSWORD", default_value = "energyhistorian")]
+    clickhouse_password: String,
 }
 
 #[derive(Clone)]
@@ -78,6 +86,19 @@ struct ControlPlaneSummary {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let db = open_state_db(&args.state_db)?;
+    let recovered = pipeline::requeue_unpublished_artifacts(&db);
+    if recovered > 0 {
+        eprintln!("[startup] requeued {recovered} unpublished artifact(s)");
+    }
+    let clickhouse = ClickHouseConfig {
+        url: args.clickhouse_url.clone(),
+        user: args.clickhouse_user.clone(),
+        password: args.clickhouse_password.clone(),
+    };
+    warehouse::ClickHousePublisher::new(clickhouse.clone())?
+        .ensure_ready()
+        .await
+        .context("checking clickhouse connectivity")?;
     let source_plans = build_source_plans();
 
     let state = AppState {
@@ -100,6 +121,7 @@ async fn main() -> Result<()> {
             data_dir.join("raw"),
             data_dir.join("parsed"),
             data_dir.join("schema_registry"),
+            clickhouse,
         )
         .await;
     });
@@ -181,6 +203,17 @@ fn open_state_db(path: &PathBuf) -> Result<Connection> {
             fetched_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS artifact_publications (
+            artifact_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            collection_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            published_at TEXT,
+            last_error TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS tasks (
             task_id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
@@ -231,6 +264,7 @@ async fn control_plane() -> Json<ControlPlaneSummary> {
             "source_collections",
             "discovered_artifacts",
             "fetched_artifacts",
+            "artifact_publications",
             "tasks",
         ],
         notes: vec![

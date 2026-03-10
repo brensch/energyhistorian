@@ -8,6 +8,9 @@ services:
         condition: service_healthy
     environment:
       RUST_LOG: info
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: energyhistorian
+      CLICKHOUSE_PASSWORD: energyhistorian
     ports:
       - "8080:8080"
     volumes:
@@ -21,13 +24,28 @@ services:
     environment:
       CLICKHOUSE_USER: energyhistorian
       CLICKHOUSE_PASSWORD: energyhistorian
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
       - "8123:8123"
       - "9000:9000"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test:
+        [
+          "CMD",
+          "clickhouse-client",
+          "--user",
+          "energyhistorian",
+          "--password",
+          "energyhistorian",
+          "--query",
+          "SELECT 1",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12
