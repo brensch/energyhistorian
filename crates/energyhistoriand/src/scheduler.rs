@@ -9,12 +9,13 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, DiscoveredArtifact, FileSchemaRegistry, LocalArtifact,
-    SourcePlugin,
 };
 use rusqlite::Connection;
 use source_nemweb::NemwebPlugin;
+use tracing::{error, info, warn};
 
 use crate::pipeline;
+use crate::schedule_state::{self, CollectionScheduleSeed};
 use crate::warehouse::{ClickHouseConfig, ClickHousePublisher};
 
 const LEASE_SECS: i64 = 300;
@@ -41,6 +42,7 @@ pub async fn run(
     parsed_dir: PathBuf,
     schema_registry_dir: PathBuf,
     clickhouse: ClickHouseConfig,
+    schedule_seeds: Vec<CollectionScheduleSeed>,
 ) {
     let worker_id = format!("w-{}", std::process::id());
     let client = reqwest::Client::builder()
@@ -51,7 +53,7 @@ pub async fn run(
     let publisher = ClickHousePublisher::new(clickhouse).expect("build clickhouse publisher");
     let nemweb = NemwebPlugin::new();
 
-    eprintln!("[scheduler] started id={worker_id}");
+    info!(worker_id = %worker_id, "scheduler started");
 
     loop {
         if let Err(e) = tick(
@@ -63,10 +65,11 @@ pub async fn run(
             &parsed_dir,
             &schema_registry_dir,
             &publisher,
+            &schedule_seeds,
         )
         .await
         {
-            eprintln!("[scheduler] tick error: {e:#}");
+            error!(error = ?e, "scheduler tick error");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -81,6 +84,7 @@ async fn tick(
     parsed_dir: &Path,
     schema_dir: &Path,
     publisher: &ClickHousePublisher,
+    schedule_seeds: &[CollectionScheduleSeed],
 ) -> Result<()> {
     recover_expired_leases(db);
 
@@ -92,9 +96,12 @@ async fn tick(
             break;
         };
 
-        eprintln!(
-            "[scheduler] claimed {} ({}/{}:{})",
-            task.task_id, task.source_id, task.collection_id, task.task_kind
+        info!(
+            task_id = %task.task_id,
+            source_id = %task.source_id,
+            collection_id = %task.collection_id,
+            task_kind = %task.task_kind,
+            "claimed task"
         );
 
         let db2 = db.clone();
@@ -104,6 +111,7 @@ async fn tick(
         let parsed2 = parsed_dir.to_path_buf();
         let schema2 = schema_dir.to_path_buf();
         let publisher2 = publisher.clone();
+        let schedule_seeds2 = schedule_seeds.to_vec();
 
         tokio::spawn(async move {
             let result = execute_task(
@@ -115,18 +123,27 @@ async fn tick(
                 &parsed2,
                 &schema2,
                 &publisher2,
+                &schedule_seeds2,
             )
             .await;
 
             match result {
                 Ok(msg) => {
-                    eprintln!("[scheduler] OK {}: {msg}", task.task_id);
+                    info!(task_id = %task.task_id, message = %msg, "task completed");
                     mark_completed(&db2, &task.task_id, &msg);
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    eprintln!("[scheduler] FAIL {}: {msg}", task.task_id);
-                    mark_failed(&db2, &task.task_id, task.attempts, &msg);
+                    error!(task_id = %task.task_id, error = %msg, "task failed");
+                    mark_failed(
+                        &db2,
+                        &task.task_id,
+                        &task.source_id,
+                        &task.collection_id,
+                        &task.task_kind,
+                        task.attempts,
+                        &msg,
+                    );
                 }
             }
         });
@@ -142,6 +159,22 @@ async fn tick(
 fn recover_expired_leases(db: &Arc<Mutex<Connection>>) {
     let conn = db.lock().expect("mutex");
     let now = Utc::now().to_rfc3339();
+    let mut expired = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT source_id, collection_id, task_kind \
+         FROM tasks \
+         WHERE status = 'running' AND lease_expires_at < ?1",
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![now.clone()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) {
+            expired.extend(rows.filter_map(|row| row.ok()));
+        }
+    }
     let n = conn
         .execute(
             "UPDATE tasks SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL \
@@ -149,8 +182,11 @@ fn recover_expired_leases(db: &Arc<Mutex<Connection>>) {
             rusqlite::params![now],
         )
         .unwrap_or(0);
+    for (source_id, collection_id, task_kind) in expired {
+        schedule_state::note_lease_recovered(&conn, &source_id, &collection_id, &task_kind);
+    }
     if n > 0 {
-        eprintln!("[scheduler] recovered {n} expired lease(s)");
+        warn!(expired_leases = n, "recovered expired task leases");
     }
 }
 
@@ -199,11 +235,29 @@ fn claim_next(db: &Arc<Mutex<Connection>>, worker_id: &str) -> Option<TaskRow> {
         )
         .unwrap_or(0);
 
-    if claimed > 0 { Some(task) } else { None }
+    if claimed > 0 {
+        schedule_state::note_task_started(
+            &conn,
+            &task.source_id,
+            &task.collection_id,
+            &task.task_id,
+            &task.task_kind,
+        );
+        Some(task)
+    } else {
+        None
+    }
 }
 
 fn mark_completed(db: &Arc<Mutex<Connection>>, task_id: &str, message: &str) {
     let conn = db.lock().expect("mutex");
+    let task_meta: Option<(String, String)> = conn
+        .query_row(
+            "SELECT source_id, collection_id FROM tasks WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
     conn.execute(
         "UPDATE tasks SET status = 'completed', finished_at = ?1, message = ?2, \
          lease_owner = NULL, lease_expires_at = NULL \
@@ -211,9 +265,20 @@ fn mark_completed(db: &Arc<Mutex<Connection>>, task_id: &str, message: &str) {
         rusqlite::params![Utc::now().to_rfc3339(), message, task_id],
     )
     .ok();
+    if let Some((source_id, collection_id)) = task_meta {
+        schedule_state::note_task_completed(&conn, &source_id, &collection_id);
+    }
 }
 
-fn mark_failed(db: &Arc<Mutex<Connection>>, task_id: &str, attempts: i64, message: &str) {
+fn mark_failed(
+    db: &Arc<Mutex<Connection>>,
+    task_id: &str,
+    source_id: &str,
+    collection_id: &str,
+    task_kind: &str,
+    attempts: i64,
+    message: &str,
+) {
     let conn = db.lock().expect("mutex");
     if attempts < MAX_RETRIES {
         let retry_at = (Utc::now() + chrono::Duration::seconds(RETRY_DELAY_SECS)).to_rfc3339();
@@ -228,6 +293,14 @@ fn mark_failed(db: &Arc<Mutex<Connection>>, task_id: &str, attempts: i64, messag
             ],
         )
         .ok();
+        schedule_state::note_task_failed(
+            &conn,
+            source_id,
+            collection_id,
+            task_kind,
+            message,
+            Some(&retry_at),
+        );
     } else {
         conn.execute(
             "UPDATE tasks SET status = 'failed', finished_at = ?1, message = ?2, \
@@ -236,6 +309,7 @@ fn mark_failed(db: &Arc<Mutex<Connection>>, task_id: &str, attempts: i64, messag
             rusqlite::params![Utc::now().to_rfc3339(), message, task_id],
         )
         .ok();
+        schedule_state::note_task_failed(&conn, source_id, collection_id, task_kind, message, None);
     }
 }
 
@@ -252,9 +326,10 @@ async fn execute_task(
     parsed_dir: &Path,
     schema_dir: &Path,
     publisher: &ClickHousePublisher,
+    schedule_seeds: &[CollectionScheduleSeed],
 ) -> Result<String> {
     match task.task_kind.as_str() {
-        "discover" => exec_discover(task, client, nemweb, db).await,
+        "discover" => exec_discover(task, client, nemweb, db, schedule_seeds).await,
         "fetch" => exec_fetch(task, client, nemweb, db, raw_dir).await,
         "parse" => exec_parse(task, nemweb, db, parsed_dir, schema_dir, publisher).await,
         kind => anyhow::bail!("no executor for task kind '{kind}'"),
@@ -266,6 +341,7 @@ async fn exec_discover(
     client: &reqwest::Client,
     nemweb: &NemwebPlugin,
     db: &Arc<Mutex<Connection>>,
+    schedule_seeds: &[CollectionScheduleSeed],
 ) -> Result<String> {
     // Source-specific: get artifacts
     let artifacts = match task.source_id.as_str() {
@@ -289,8 +365,19 @@ async fn exec_discover(
     let outcome =
         pipeline::record_discoveries(&conn, &task.source_id, &task.collection_id, &discoveries);
     let poll_delay_secs =
-        collection_poll_interval_secs(nemweb, &task.source_id, &task.collection_id);
-    pipeline::schedule_next_discovery(&conn, &task.source_id, &task.collection_id, poll_delay_secs);
+        collection_poll_interval_secs(schedule_seeds, &task.source_id, &task.collection_id);
+    let scheduled = pipeline::schedule_next_discovery(
+        &conn,
+        &task.source_id,
+        &task.collection_id,
+        poll_delay_secs,
+    );
+    schedule_state::note_discover_scheduled(
+        &conn,
+        &task.source_id,
+        &task.collection_id,
+        &scheduled,
+    );
 
     Ok(outcome.to_string())
 }
@@ -452,18 +539,14 @@ fn require_str<'a>(payload: &'a serde_json::Value, field: &str) -> Result<&'a st
 }
 
 fn collection_poll_interval_secs(
-    nemweb: &NemwebPlugin,
+    schedule_seeds: &[CollectionScheduleSeed],
     source_id: &str,
     collection_id: &str,
 ) -> i64 {
-    match source_id {
-        "aemo.nemweb" => nemweb
-            .collections()
-            .into_iter()
-            .find(|collection| collection.id == collection_id)
-            .and_then(|collection| collection.default_poll_interval_seconds)
-            .map(|secs| secs as i64)
-            .unwrap_or(DEFAULT_REDISCOVER_DELAY_SECS),
-        _ => DEFAULT_REDISCOVER_DELAY_SECS,
-    }
+    schedule_seeds
+        .iter()
+        .find(|seed| seed.source_id == source_id && seed.collection_id == collection_id)
+        .and_then(|seed| seed.poll_interval_seconds)
+        .map(|secs| secs as i64)
+        .unwrap_or(DEFAULT_REDISCOVER_DELAY_SECS)
 }

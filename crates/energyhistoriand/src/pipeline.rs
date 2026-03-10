@@ -12,6 +12,8 @@ use chrono::Utc;
 use ingest_core::{FileSchemaRegistry, LocalArtifact, ParseResult};
 use rusqlite::Connection;
 
+use crate::schedule_state::ScheduledTask;
+
 // ---------------------------------------------------------------------------
 // Input types — what sources hand up
 // ---------------------------------------------------------------------------
@@ -180,7 +182,7 @@ pub fn schedule_next_discovery(
     source_id: &str,
     collection_id: &str,
     delay_secs: i64,
-) {
+) -> ScheduledTask {
     let ts = Utc::now().timestamp();
     let task_id = format!("{source_id}:{collection_id}:discover:poll-{ts}");
     let available = (Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
@@ -193,6 +195,11 @@ pub fn schedule_next_discovery(
         &format!("poll-{ts}"),
         &available,
     );
+
+    ScheduledTask {
+        task_id,
+        available_at: available,
+    }
 }
 
 /// Record a successful fetch and enqueue a parse task.

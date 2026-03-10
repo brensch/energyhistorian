@@ -1,4 +1,5 @@
 mod pipeline;
+mod schedule_state;
 mod scheduler;
 mod warehouse;
 
@@ -11,14 +12,14 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
-use ingest_core::{
-    SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskKind,
-};
+use ingest_core::{SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin};
 use rusqlite::Connection;
 use serde::Serialize;
 use source_aemo_dvd::AemoDvdPlugin;
 use source_aemo_metadata::AemoMetadataPlugin;
 use source_nemweb::NemwebPlugin;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 use warehouse::ClickHouseConfig;
 
 #[derive(Parser, Debug)]
@@ -82,14 +83,51 @@ struct ControlPlaneSummary {
     notes: Vec<&'static str>,
 }
 
+#[derive(Debug, Serialize)]
+struct CollectionScheduleResponse {
+    source_id: String,
+    collection_id: String,
+    display_name: String,
+    scheduler_enabled: bool,
+    poll_interval_seconds: Option<u64>,
+    status: String,
+    next_task_kind: Option<String>,
+    next_run_at: Option<String>,
+    active_task_id: Option<String>,
+    active_task_kind: Option<String>,
+    last_task_id: Option<String>,
+    last_task_kind: Option<String>,
+    last_run_started_at: Option<String>,
+    last_run_finished_at: Option<String>,
+    last_success_at: Option<String>,
+    last_error_at: Option<String>,
+    last_error: Option<String>,
+    consecutive_failures: i64,
+    queued_tasks: i64,
+    running_tasks: i64,
+    failed_tasks: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleOverview {
+    collections: Vec<CollectionScheduleResponse>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
     let args = Args::parse();
+    let source_plans = build_source_plans();
     let db = open_state_db(&args.state_db)?;
+    let schedule_seeds = build_schedule_seeds(&source_plans);
+    let synced = schedule_state::sync_collection_schedules(&db, &schedule_seeds);
+    info!("synced collection schedule state rows={synced}");
     let recovered = pipeline::requeue_unpublished_artifacts(&db);
     if recovered > 0 {
-        eprintln!("[startup] requeued {recovered} unpublished artifact(s)");
+        info!("requeued unpublished artifacts count={recovered}");
     }
+    let bootstrapped = schedule_state::bootstrap_collection_discovery_tasks(&db, &schedule_seeds);
+    info!("bootstrapped discovery tasks count={bootstrapped}");
     let clickhouse = ClickHouseConfig {
         url: args.clickhouse_url.clone(),
         user: args.clickhouse_user.clone(),
@@ -99,7 +137,7 @@ async fn main() -> Result<()> {
         .ensure_ready()
         .await
         .context("checking clickhouse connectivity")?;
-    let source_plans = build_source_plans();
+    info!("clickhouse connectivity verified");
 
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
@@ -122,6 +160,7 @@ async fn main() -> Result<()> {
             data_dir.join("parsed"),
             data_dir.join("schema_registry"),
             clickhouse,
+            schedule_seeds,
         )
         .await;
     });
@@ -131,13 +170,14 @@ async fn main() -> Result<()> {
         .route("/sources", get(list_sources))
         .route("/control-plane", get(control_plane))
         .route("/tasks", get(list_tasks))
+        .route("/schedule", get(list_schedule))
         .route("/tasks/enqueue", post(enqueue_demo_tasks))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen_addr)
         .await
         .with_context(|| format!("binding {}", args.listen_addr))?;
-    eprintln!("listening on {}", args.listen_addr);
+    info!(listen_addr = %args.listen_addr, "energyhistoriand listening");
     axum::serve(listener, app)
         .await
         .context("running HTTP service")?;
@@ -232,6 +272,27 @@ fn open_state_db(path: &PathBuf) -> Result<Connection> {
             message TEXT,
             UNIQUE (source_id, collection_id, task_kind, idempotency_key)
         );
+
+        CREATE TABLE IF NOT EXISTS collection_schedule_state (
+            source_id TEXT NOT NULL,
+            collection_id TEXT NOT NULL,
+            scheduler_enabled INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            next_task_kind TEXT,
+            next_run_at TEXT,
+            active_task_id TEXT,
+            active_task_kind TEXT,
+            last_task_id TEXT,
+            last_task_kind TEXT,
+            last_run_started_at TEXT,
+            last_run_finished_at TEXT,
+            last_success_at TEXT,
+            last_error_at TEXT,
+            last_error TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (source_id, collection_id)
+        );
         "#,
     )
     .context("initializing sqlite control-plane schema")?;
@@ -266,6 +327,7 @@ async fn control_plane() -> Json<ControlPlaneSummary> {
             "fetched_artifacts",
             "artifact_publications",
             "tasks",
+            "collection_schedule_state",
         ],
         notes: vec![
             "SQLite is the operational truth for queueing and completion tracking.",
@@ -276,54 +338,28 @@ async fn control_plane() -> Json<ControlPlaneSummary> {
 }
 
 async fn enqueue_demo_tasks(State(state): State<AppState>) -> Json<Vec<EnqueueResponse>> {
-    let mut responses = Vec::new();
     let db = state.db.lock().expect("sqlite mutex poisoned");
+    let seeds = build_schedule_seeds(&state.source_plans);
+    let responses = seeds
+        .into_iter()
+        .filter(|seed| seed.scheduler_enabled)
+        .map(|seed| {
+            let task_id = format!("{}:{}:discover:bootstrap", seed.source_id, seed.collection_id);
+            let changed = db
+                .execute(
+                    "INSERT OR IGNORE INTO tasks \
+                     (task_id, source_id, collection_id, task_kind, idempotency_key, status, available_at) \
+                     VALUES (?1, ?2, ?3, 'discover', 'bootstrap', 'queued', CURRENT_TIMESTAMP)",
+                    rusqlite::params![task_id, seed.source_id, seed.collection_id],
+                )
+                .expect("enqueue bootstrap discover task");
 
-    for source in state.source_plans.iter() {
-        for collection in &source.collections {
-            for blueprint in &collection.task_blueprints {
-                let task_id = format!(
-                    "{}:{}:{}:{}",
-                    source.descriptor.source_id,
-                    collection.id,
-                    task_kind_slug(&blueprint.kind),
-                    "bootstrap"
-                );
-                let idempotency_key = "bootstrap".to_string();
-                let changed = db
-                    .execute(
-                        r#"
-                        INSERT OR IGNORE INTO tasks (
-                            task_id, source_id, collection_id, task_kind, idempotency_key, status, payload_json
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)
-                        "#,
-                        rusqlite::params![
-                            task_id,
-                            source.descriptor.source_id,
-                            collection.id,
-                            task_kind_slug(&blueprint.kind),
-                            idempotency_key,
-                            format!(
-                                "{{\"max_concurrency\":{},\"queue\":\"{}\"}}",
-                                blueprint.max_concurrency, blueprint.queue
-                            )
-                        ],
-                    )
-                    .expect("enqueue bootstrap task");
-
-                responses.push(EnqueueResponse {
-                    accepted: changed > 0,
-                    task_id: format!(
-                        "{}:{}:{}:{}",
-                        source.descriptor.source_id,
-                        collection.id,
-                        task_kind_slug(&blueprint.kind),
-                        "bootstrap"
-                    ),
-                });
+            EnqueueResponse {
+                accepted: changed > 0,
+                task_id,
             }
-        }
-    }
+        })
+        .collect();
 
     Json(responses)
 }
@@ -361,15 +397,80 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskRecord>> {
     Json(rows.map(|row| row.expect("task row")).collect())
 }
 
-fn task_kind_slug(kind: &TaskKind) -> &'static str {
-    match kind {
-        TaskKind::Discover => "discover",
-        TaskKind::Fetch => "fetch",
-        TaskKind::Parse => "parse",
-        TaskKind::RegisterSchema => "register_schema",
-        TaskKind::ReconcileRawStorage => "reconcile_raw_storage",
-        TaskKind::ReconcileSemanticViews => "reconcile_semantic_views",
-        TaskKind::Promote => "promote",
-        TaskKind::SyncMetadata => "sync_metadata",
-    }
+async fn list_schedule(State(state): State<AppState>) -> Json<ScheduleOverview> {
+    let db = state.db.lock().expect("sqlite mutex poisoned");
+    let snapshots = schedule_state::list_collection_schedules(&db);
+    drop(db);
+
+    let collections = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let plan = state
+                .source_plans
+                .iter()
+                .find(|plan| plan.descriptor.source_id == snapshot.source_id);
+            let collection = plan.and_then(|plan| {
+                plan.collections
+                    .iter()
+                    .find(|collection| collection.id == snapshot.collection_id)
+            });
+
+            CollectionScheduleResponse {
+                source_id: snapshot.source_id,
+                collection_id: snapshot.collection_id,
+                display_name: collection
+                    .map(|collection| collection.display_name.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                scheduler_enabled: snapshot.scheduler_enabled,
+                poll_interval_seconds: collection
+                    .and_then(|collection| collection.default_poll_interval_seconds),
+                status: snapshot.status,
+                next_task_kind: snapshot.next_task_kind,
+                next_run_at: snapshot.next_run_at,
+                active_task_id: snapshot.active_task_id,
+                active_task_kind: snapshot.active_task_kind,
+                last_task_id: snapshot.last_task_id,
+                last_task_kind: snapshot.last_task_kind,
+                last_run_started_at: snapshot.last_run_started_at,
+                last_run_finished_at: snapshot.last_run_finished_at,
+                last_success_at: snapshot.last_success_at,
+                last_error_at: snapshot.last_error_at,
+                last_error: snapshot.last_error,
+                consecutive_failures: snapshot.consecutive_failures,
+                queued_tasks: snapshot.queued_tasks,
+                running_tasks: snapshot.running_tasks,
+                failed_tasks: snapshot.failed_tasks,
+            }
+        })
+        .collect();
+
+    Json(ScheduleOverview { collections })
+}
+
+fn build_schedule_seeds(
+    source_plans: &[SourcePlan],
+) -> Vec<schedule_state::CollectionScheduleSeed> {
+    source_plans
+        .iter()
+        .flat_map(|source| {
+            source
+                .collections
+                .iter()
+                .map(|collection| schedule_state::CollectionScheduleSeed {
+                    source_id: source.descriptor.source_id.clone(),
+                    collection_id: collection.id.clone(),
+                    poll_interval_seconds: collection.default_poll_interval_seconds,
+                    scheduler_enabled: source.descriptor.source_id == "aemo.nemweb",
+                })
+        })
+        .collect()
+}
+
+fn init_logging() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .compact()
+        .init();
 }

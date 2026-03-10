@@ -12,13 +12,9 @@ services:
       CLICKHOUSE_USER: energyhistorian
       CLICKHOUSE_PASSWORD: energyhistorian
     ports:
-      - "8080:8080"
+      - "18080:8080"
     volumes:
-      - .:/app
-      - cargo-registry:/usr/local/cargo/registry
-      - cargo-git:/usr/local/cargo/git
-      - target-cache:/app/target
-    working_dir: /app
+      - service-data:/data
   clickhouse:
     image: clickhouse/clickhouse-server:25.2
     environment:
@@ -51,7 +47,5 @@ services:
       retries: 12
 
 volumes:
-  cargo-registry:
-  cargo-git:
-  target-cache:
   clickhouse-data:
+  service-data:
