@@ -1,0 +1,19 @@
+[package]
+name = "energyhistoriand"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+ingest-core = { path = "../ingest-core" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+source-aemo-dvd = { path = "../source-aemo-dvd" }
+source-aemo-metadata = { path = "../source-aemo-metadata" }
+source-nemweb = { path = "../source-nemweb" }
+tokio = { version = "1.46", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }

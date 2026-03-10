@@ -1,0 +1,39 @@
+services:
+  energyhistoriand:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    working_dir: /app
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.2
+    environment:
+      CLICKHOUSE_USER: energyhistorian
+      CLICKHOUSE_PASSWORD: energyhistorian
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target-cache:
+  clickhouse-data:

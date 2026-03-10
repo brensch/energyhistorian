@@ -1,0 +1,9 @@
+[workspace]
+members = [
+  "crates/energyhistoriand",
+  "crates/ingest-core",
+  "crates/source-aemo-dvd",
+  "crates/source-aemo-metadata",
+  "crates/source-nemweb",
+]
+resolver = "2"

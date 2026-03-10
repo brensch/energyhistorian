@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+/target/
+/data/raw/
+/data/parsed/
+/vendor/
+
+*.sqlite
