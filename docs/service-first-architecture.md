@@ -2,25 +2,29 @@
 
 ## Direction
 
-This repo is moving away from a one-shot CLI-centric ingestion model and toward a long-lived Rust service.
+This repo is moving away from a one-shot CLI-centric ingestion model and toward long-lived Rust services.
 
 The target shape is:
 
-- `energyhistoriand`
-  - always-on control-plane and execution service
-- `SQLite`
-  - operational truth for discovery/fetch/parse/promote coordination
+- `schedulerd`
+  - always-on scheduler and discovery service
+- `downloaderd`
+  - fetch workers writing immutable artifacts into S3-compatible storage
+- `parserd`
+  - parse workers reading artifacts and publishing raw tables
+- `Postgres`
+  - operational truth for discovery/fetch/parse coordination
 - `ClickHouse`
   - raw, semantic, and serving data warehouse
-- optional `Dagster`
-  - external orchestration and visibility, not pipeline correctness state
+- `MinIO` or another S3-compatible object store
+  - immutable fetched artifact storage
 
 ## Why A Service
 
 The service model is a better fit because it can:
 
-- keep a single managed SQLite connection with `WAL` mode
-- impose concurrency limits centrally
+- coordinate work in Postgres with leases and retries
+- impose concurrency limits per role
 - queue work across sources and collections
 - expose a stable HTTP/admin surface
 - maintain durable completion and idempotency state
@@ -46,7 +50,7 @@ This keeps source semantics in Rust rather than leaking them into orchestration.
 
 ## Control Plane Responsibilities
 
-The service owns:
+The services own:
 
 - source registry
 - collection registry
@@ -59,7 +63,7 @@ The service owns:
 - semantic-view reconciliation
 - promotion scheduling
 
-SQLite is the right initial home for this because the service is expected to be a single authoritative writer.
+Postgres is the right operational home because the system needs multiple workers with `SKIP LOCKED` claims, advisory-lock leadership, and durable retry state.
 
 ## Warehouse Responsibilities
 
@@ -96,11 +100,12 @@ It should not own:
 
 ## Initial HTTP Surface
 
-The first service scaffold exposes:
+Each service exposes:
 
 - `/healthz`
-- `/sources`
-- `/control-plane`
+- `/livez`
+- `/readyz`
+- `/startupz`
 
 That is intentionally small. The next useful endpoints are:
 

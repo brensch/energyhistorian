@@ -591,7 +591,11 @@ But they should be promotion outputs from the registry, not hand-special cases h
 ## Recommended service layout in the repo
 
 ```text
-crates/
+apps/
+  schedulerd/
+  downloaderd/
+  parserd/
+libs/
   ingest-core/
     artifact/
     schema/

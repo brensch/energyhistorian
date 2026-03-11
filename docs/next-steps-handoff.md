@@ -2,10 +2,11 @@
 
 ## Immediate Goal
 
-Turn the current service scaffold into the real `nemscraper` replacement:
+Turn the current split-service scaffold into the real `nemscraper` replacement:
 
 - queue-driven
-- SQLite control plane
+- Postgres control plane
+- S3-compatible immutable artifact storage
 - ClickHouse raw hashed tables
 - modular source plugins
 - stable semantic views above raw storage
@@ -14,10 +15,13 @@ Turn the current service scaffold into the real `nemscraper` replacement:
 
 Already in place:
 
-- service daemon: [crates/energyhistoriand/src/main.rs](/home/brensch/energyhistorian/crates/energyhistoriand/src/main.rs)
-- source/task/completion model: [crates/ingest-core/src/plugin.rs](/home/brensch/energyhistorian/crates/ingest-core/src/plugin.rs)
-- NEMweb source plugin with real fetch/parse helper logic: [crates/source-nemweb/src/lib.rs](/home/brensch/energyhistorian/crates/source-nemweb/src/lib.rs)
-- raw hashed table planner: [crates/ingest-core/src/raw_storage.rs](/home/brensch/energyhistorian/crates/ingest-core/src/raw_storage.rs)
+- scheduler service: [apps/schedulerd/src/main.rs](/home/brensch/energyhistorian/apps/schedulerd/src/main.rs)
+- downloader service: [apps/downloaderd/src/main.rs](/home/brensch/energyhistorian/apps/downloaderd/src/main.rs)
+- parser service: [apps/parserd/src/main.rs](/home/brensch/energyhistorian/apps/parserd/src/main.rs)
+- runtime orchestration library: [libs/runtime/src/services.rs](/home/brensch/energyhistorian/libs/runtime/src/services.rs)
+- source/task/completion model: [libs/ingest-core/src/plugin.rs](/home/brensch/energyhistorian/libs/ingest-core/src/plugin.rs)
+- NEMweb source plugin with real fetch/parse helper logic: [libs/source-nemweb/src/lib.rs](/home/brensch/energyhistorian/libs/source-nemweb/src/lib.rs)
+- raw hashed table planner: [libs/ingest-core/src/raw_storage.rs](/home/brensch/energyhistorian/libs/ingest-core/src/raw_storage.rs)
 - architecture docs:
   - [docs/service-first-architecture.md](/home/brensch/energyhistorian/docs/service-first-architecture.md)
   - [docs/schema-evolution-strategy.md](/home/brensch/energyhistorian/docs/schema-evolution-strategy.md)
@@ -32,22 +36,22 @@ Already in place:
    - `register_schema`
    - `reconcile_raw_table`
 
-2. Replace the placeholder `/tasks/enqueue` flow with a real queue API.
-   - Add:
+2. Add explicit admin APIs over the Postgres task queue when needed.
+   - current workers already use leases and retries in Postgres
+   - future additions can expose:
    - `POST /tasks`
-   - `POST /tasks/claim`
-   - `POST /tasks/:id/complete`
-   - `POST /tasks/:id/fail`
-   - enforce leases and retries in SQLite
+   - `POST /tasks/:id/requeue`
+   - `POST /tasks/:id/cancel`
+   - `GET /tasks`
 
-3. Implement a bounded worker pool in `energyhistoriand`.
+3. Harden worker concurrency and lease recovery further.
    - concurrency by queue/task blueprint
-   - one scheduler loop polling for runnable tasks
+   - scheduler leadership via advisory lock
    - lease expiry recovery for crashed workers
 
 4. Wire ClickHouse reconciliation and loading.
    - use the Rust `clickhouse` crate, not ad hoc HTTP
-   - create raw physical tables from `ObservedSchema` using [crates/ingest-core/src/raw_storage.rs](/home/brensch/energyhistorian/crates/ingest-core/src/raw_storage.rs)
+   - create raw physical tables from `ObservedSchema` using [libs/ingest-core/src/raw_storage.rs](/home/brensch/energyhistorian/libs/ingest-core/src/raw_storage.rs)
    - load parsed rows into the schema-hash-specific raw tables
 
 5. Persist parsed rows properly.
@@ -67,7 +71,7 @@ Already in place:
    - population dates
    - this should drive schema descriptions and logical-table mapping
 
-8. Add SQLite tables beyond the current minimum.
+8. Add Postgres tables beyond the current minimum.
    - `schema_versions`
    - `schema_columns`
    - `raw_table_mappings`
@@ -77,7 +81,7 @@ Already in place:
 
 ## Important Design Constraints
 
-- Keep SQLite as operational truth.
+- Keep Postgres as operational truth.
 - Keep ClickHouse as warehouse only.
 - Keep raw tables schema-hash-specific.
 - Do not collapse new schemas into existing raw tables.
@@ -92,9 +96,7 @@ Already in place:
 
 ## Good First Concrete Task
 
-If handing off for coding, the best first change is:
+If handing off for coding, the best next change is:
 
-- implement real task claiming/execution in [crates/energyhistoriand/src/main.rs](/home/brensch/energyhistorian/crates/energyhistoriand/src/main.rs)
-- then move NEMweb `discover/fetch/parse` behind that execution path
-
-That is the point where this becomes a real service rather than a scaffold.
+- add task-heartbeat renewal for long parses in [libs/runtime/src/queue.rs](/home/brensch/energyhistorian/libs/runtime/src/queue.rs)
+- then move semantic promotion into a separate promoted-data service or job tier

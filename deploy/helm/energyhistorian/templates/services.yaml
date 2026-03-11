@@ -69,6 +69,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "energyhistorian.fullname" $ }}-secrets
                   key: s3-secret-access-key
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "energyhistorian.fullname" $ }}-secrets
+                  key: clickhouse-user
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "energyhistorian.fullname" $ }}-secrets
+                  key: clickhouse-password
           readinessProbe:
             httpGet:
               path: /readyz

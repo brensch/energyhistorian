@@ -7,6 +7,7 @@ use controlplane::{
     HealthState, ObjectStoreConfig, ServiceConfig, ServiceRole, connect_postgres,
     spawn_health_server,
 };
+use runtime::{ClickHouseConfig, SourceRegistry, run_parser_service};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -29,6 +30,12 @@ struct Args {
     s3_secret_access_key: String,
     #[arg(long, env = "S3_FORCE_PATH_STYLE", default_value_t = true)]
     s3_force_path_style: bool,
+    #[arg(long, env = "CLICKHOUSE_URL", default_value = "http://127.0.0.1:8123")]
+    clickhouse_url: String,
+    #[arg(long, env = "CLICKHOUSE_USER", default_value = "energyhistorian")]
+    clickhouse_user: String,
+    #[arg(long, env = "CLICKHOUSE_PASSWORD", default_value = "energyhistorian")]
+    clickhouse_password: String,
     #[arg(long, env = "POLL_INTERVAL_SECS", default_value_t = 5)]
     poll_interval_secs: u64,
     #[arg(long, env = "CLAIM_BATCH_SIZE", default_value_t = 10)]
@@ -41,10 +48,16 @@ struct Args {
 async fn main() -> Result<()> {
     init_logging();
     let args = Args::parse();
+    let clickhouse = ClickHouseConfig {
+        url: args.clickhouse_url.clone(),
+        user: args.clickhouse_user.clone(),
+        password: args.clickhouse_password.clone(),
+    };
     let config = build_config(args, ServiceRole::Parser);
     let health = HealthState::default();
     let health_server = spawn_health_server(config.role, config.listen_addr, health.clone());
-    let _db = connect_postgres(&config.postgres_url).await?;
+    let postgres = connect_postgres(&config.postgres_url).await?;
+    let registry = SourceRegistry::new();
     health.mark_startup_complete();
     health.mark_ready();
 
@@ -52,18 +65,29 @@ async fn main() -> Result<()> {
         role = config.role.as_str(),
         listen_addr = %config.listen_addr,
         postgres_url = %config.postgres_url,
-        bucket = %config.object_store.bucket,
-        object_store_region = %config.object_store.region,
-        "service configured"
-    );
-    info!(
-        poll_interval_secs = config.poll_interval.as_secs(),
+        clickhouse_url = %clickhouse.url,
         claim_batch_size = config.claim_batch_size,
         max_concurrency = config.max_concurrency,
-        "parser service scaffold ready"
+        "parser ready"
     );
 
-    health_server.await.context("health server task panicked")?
+    tokio::select! {
+        result = run_parser_service(
+            postgres,
+            &config.postgres_url,
+            config.object_store.clone(),
+            clickhouse,
+            config.poll_interval,
+            config.claim_batch_size,
+            config.max_concurrency,
+            registry,
+        ) => result,
+        result = health_server => result.context("health server task panicked")?,
+        result = tokio::signal::ctrl_c() => {
+            result.context("waiting for ctrl-c")?;
+            Ok(())
+        }
+    }
 }
 
 fn build_config(args: Args, role: ServiceRole) -> ServiceConfig {

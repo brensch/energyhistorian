@@ -7,7 +7,6 @@ COPY libs ./libs
 
 RUN cargo build --release --locked \
     --package downloaderd \
-    --package energyhistoriand \
     --package parserd \
     --package schedulerd
 
@@ -20,7 +19,6 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/downloaderd /usr/local/bin/downloaderd
-COPY --from=builder /app/target/release/energyhistoriand /usr/local/bin/energyhistoriand
 COPY --from=builder /app/target/release/parserd /usr/local/bin/parserd
 COPY --from=builder /app/target/release/schedulerd /usr/local/bin/schedulerd
 

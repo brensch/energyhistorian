@@ -23,6 +23,12 @@ minio:
   bucket: historian-raw
   storageSize: 100Gi
 
+clickhouse:
+  image: clickhouse/clickhouse-server:25.2
+  username: energyhistorian
+  password: energyhistorian
+  storageSize: 100Gi
+
 services:
   scheduler:
     binary: schedulerd

@@ -9,3 +9,4 @@ data:
   S3_REGION: "us-east-1"
   S3_BUCKET: {{ .Values.minio.bucket | quote }}
   S3_FORCE_PATH_STYLE: "true"
+  CLICKHOUSE_URL: {{ printf "http://%s:8123" (include "energyhistorian.clickhouseHost" .) | quote }}

@@ -7,7 +7,6 @@ Rust-first energy market historisation platform, moving toward a Kubernetes-nati
 - `apps/`
   - runnable Rust services
   - `schedulerd`, `downloaderd`, `parserd`
-  - `energyhistoriand` remains as the current monolith during migration
 - `libs/`
   - reusable Rust libraries
   - source plugins stay here so execution topology can change without rewriting source semantics
@@ -59,4 +58,4 @@ The default dev credentials remain `energyhistorian` / `energyhistorian` for Pos
 - The long-term direction is service-first with Postgres as the operational control plane and S3-compatible object storage for immutable fetched artifacts.
 - The source crates remain the core ingestion logic; the service split is around orchestration and execution roles.
 - ClickHouse remains the analytical warehouse.
-- The `apps/energyhistoriand` monolith is transitional and will be carved apart into the new services over time.
+- The execution path now runs through the split services with Postgres task coordination, MinIO artifact storage, and ClickHouse publication.

@@ -7,6 +7,7 @@ use controlplane::{
     HealthState, ObjectStoreConfig, ServiceConfig, ServiceRole, connect_postgres,
     spawn_health_server,
 };
+use runtime::{SourceRegistry, run_downloader_service};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -44,7 +45,8 @@ async fn main() -> Result<()> {
     let config = build_config(args, ServiceRole::Downloader);
     let health = HealthState::default();
     let health_server = spawn_health_server(config.role, config.listen_addr, health.clone());
-    let _db = connect_postgres(&config.postgres_url).await?;
+    let postgres = connect_postgres(&config.postgres_url).await?;
+    let registry = SourceRegistry::new();
     health.mark_startup_complete();
     health.mark_ready();
 
@@ -53,18 +55,27 @@ async fn main() -> Result<()> {
         listen_addr = %config.listen_addr,
         postgres_url = %config.postgres_url,
         bucket = %config.object_store.bucket,
-        object_store_endpoint = %config.object_store.endpoint,
-        path_style = config.object_store.force_path_style,
-        "service configured"
-    );
-    info!(
-        poll_interval_secs = config.poll_interval.as_secs(),
         claim_batch_size = config.claim_batch_size,
         max_concurrency = config.max_concurrency,
-        "downloader service scaffold ready"
+        "downloader ready"
     );
 
-    health_server.await.context("health server task panicked")?
+    tokio::select! {
+        result = run_downloader_service(
+            postgres,
+            &config.postgres_url,
+            config.object_store.clone(),
+            config.poll_interval,
+            config.claim_batch_size,
+            config.max_concurrency,
+            registry,
+        ) => result,
+        result = health_server => result.context("health server task panicked")?,
+        result = tokio::signal::ctrl_c() => {
+            result.context("waiting for ctrl-c")?;
+            Ok(())
+        }
+    }
 }
 
 fn build_config(args: Args, role: ServiceRole) -> ServiceConfig {

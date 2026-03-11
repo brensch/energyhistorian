@@ -1,0 +1,25 @@
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+aws-config = "1.8"
+aws-credential-types = "1.2"
+aws-sdk-s3 = "1.79"
+chrono = { version = "0.4", features = ["serde"] }
+controlplane = { path = "../controlplane" }
+futures-util = "0.3"
+ingest-core = { path = "../ingest-core" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+source-aemo-dvd = { path = "../source-aemo-dvd" }
+source-aemo-metadata = { path = "../source-aemo-metadata" }
+source-nemweb = { path = "../source-nemweb" }
+tempfile = "3.23"
+tokio = { version = "1.46", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
+tracing = "0.1"

@@ -7,6 +7,7 @@ use controlplane::{
     HealthState, ObjectStoreConfig, ServiceConfig, ServiceRole, bootstrap_postgres,
     spawn_health_server,
 };
+use runtime::{SourceRegistry, build_schedule_seeds, run_scheduler_service};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -44,7 +45,9 @@ async fn main() -> Result<()> {
     let config = build_config(args, ServiceRole::Scheduler);
     let health = HealthState::default();
     let health_server = spawn_health_server(config.role, config.listen_addr, health.clone());
-    let _db = bootstrap_postgres(&config.postgres_url).await?;
+    let postgres = bootstrap_postgres(&config.postgres_url).await?;
+    let registry = SourceRegistry::new();
+    let schedule_seeds = build_schedule_seeds(&registry.source_plans());
     health.mark_startup_complete();
     health.mark_ready();
 
@@ -52,18 +55,28 @@ async fn main() -> Result<()> {
         role = config.role.as_str(),
         listen_addr = %config.listen_addr,
         postgres_url = %config.postgres_url,
-        bucket = %config.object_store.bucket,
-        "service configured"
-    );
-    info!(
-        poll_interval_secs = config.poll_interval.as_secs(),
+        schedule_seed_count = schedule_seeds.len(),
         claim_batch_size = config.claim_batch_size,
         max_concurrency = config.max_concurrency,
-        bootstrap_sql_bytes = controlplane::CONTROL_PLANE_BOOTSTRAP_SQL.len(),
-        "scheduler service scaffold ready"
+        "scheduler ready"
     );
 
-    health_server.await.context("health server task panicked")?
+    tokio::select! {
+        result = run_scheduler_service(
+            postgres,
+            &config.postgres_url,
+            config.poll_interval,
+            config.claim_batch_size,
+            config.max_concurrency,
+            registry,
+            schedule_seeds,
+        ) => result,
+        result = health_server => result.context("health server task panicked")?,
+        result = tokio::signal::ctrl_c() => {
+            result.context("waiting for ctrl-c")?;
+            Ok(())
+        }
+    }
 }
 
 fn build_config(args: Args, role: ServiceRole) -> ServiceConfig {

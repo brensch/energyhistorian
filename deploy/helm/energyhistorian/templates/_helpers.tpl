@@ -30,3 +30,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "energyhistorian.minioHost" -}}
 {{- printf "%s-minio" (include "energyhistorian.fullname" .) -}}
 {{- end -}}
+
+{{- define "energyhistorian.clickhouseHost" -}}
+{{- printf "%s-clickhouse" (include "energyhistorian.fullname" .) -}}
+{{- end -}}

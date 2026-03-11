@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS task_queue (
     source_id TEXT NOT NULL,
     collection_id TEXT NOT NULL,
     task_kind TEXT NOT NULL,
+    artifact_id TEXT,
     task_state TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     payload_json JSONB,
@@ -22,6 +23,9 @@ CREATE TABLE IF NOT EXISTS task_queue (
 
 CREATE INDEX IF NOT EXISTS idx_task_queue_claim
     ON task_queue (task_state, available_at, priority, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_queue_idempotency
+    ON task_queue (task_kind, idempotency_key);
 
 CREATE TABLE IF NOT EXISTS collection_schedules (
     source_id TEXT NOT NULL,
@@ -43,6 +47,7 @@ CREATE TABLE IF NOT EXISTS discovered_artifacts (
     collection_id TEXT NOT NULL,
     remote_uri TEXT NOT NULL,
     artifact_kind TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
     discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     publication_timestamp TIMESTAMPTZ,
     artifact_metadata_json JSONB,
@@ -61,7 +66,7 @@ CREATE TABLE IF NOT EXISTS stored_artifacts (
 );
 
 CREATE TABLE IF NOT EXISTS parse_runs (
-    run_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
     artifact_id TEXT NOT NULL REFERENCES discovered_artifacts (artifact_id),
     parser_service TEXT NOT NULL,
     parser_version TEXT NOT NULL,
@@ -70,6 +75,7 @@ CREATE TABLE IF NOT EXISTS parse_runs (
     output_summary_json JSONB,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
-    error_text TEXT
+    error_text TEXT,
+    PRIMARY KEY (artifact_id, parser_version)
 );
 "#;

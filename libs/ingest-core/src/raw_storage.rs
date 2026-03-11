@@ -21,6 +21,7 @@ pub fn plan_raw_table(schema: &ObservedSchema) -> RawTablePlan {
     columns.push("\"schema_hash\" LowCardinality(String) CODEC(ZSTD(6))".to_string());
     columns.push("\"source_url\" String CODEC(ZSTD(6))".to_string());
     columns.push("\"archive_entry\" String CODEC(ZSTD(6))".to_string());
+    columns.push("\"row_hash\" UInt64 CODEC(ZSTD(6))".to_string());
 
     for column in &schema.columns {
         let name = quote_ident(&column.name);
@@ -114,11 +115,8 @@ fn choose_order_by(schema: &ObservedSchema, partition_col: Option<&str>) -> Vec<
         }
     }
 
-    if result.is_empty() {
-        result.push("artifact_id".to_string());
-    } else {
-        result.push("artifact_id".to_string());
-    }
+    result.push("artifact_id".to_string());
+    result.push("row_hash".to_string());
 
     result
 }

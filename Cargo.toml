@@ -1,11 +1,11 @@
 [workspace]
 members = [
   "apps/downloaderd",
-  "apps/energyhistoriand",
   "apps/parserd",
   "apps/schedulerd",
   "libs/controlplane",
   "libs/ingest-core",
+  "libs/runtime",
   "libs/source-aemo-dvd",
   "libs/source-aemo-metadata",
   "libs/source-nemweb",
