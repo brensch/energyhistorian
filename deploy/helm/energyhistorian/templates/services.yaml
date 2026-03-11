@@ -1,0 +1,91 @@
+{{- range $name, $service := .Values.services }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "energyhistorian.fullname" $ }}-{{ $name }}
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "energyhistorian.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "energyhistorian.selectorLabels" $ | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "energyhistorian.fullname" $ }}-{{ $name }}
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "energyhistorian.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ $service.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ $name }}
+      {{- include "energyhistorian.selectorLabels" $ | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: {{ $name }}
+        {{- include "energyhistorian.selectorLabels" $ | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $name }}
+          image: {{ $.Values.image.repository }}:{{ $.Values.image.tag }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["/usr/local/bin/{{ $service.binary }}"]
+          ports:
+            - containerPort: {{ $service.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "energyhistorian.fullname" $ }}-config
+          env:
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:{{ $service.port }}"
+            - name: POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "energyhistorian.fullname" $ }}-secrets
+                  key: postgres-url
+            - name: POLL_INTERVAL_SECS
+              value: {{ $service.pollIntervalSecs | quote }}
+            - name: CLAIM_BATCH_SIZE
+              value: {{ $service.claimBatchSize | quote }}
+            - name: MAX_CONCURRENCY
+              value: {{ $service.maxConcurrency | quote }}
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "energyhistorian.fullname" $ }}-secrets
+                  key: s3-access-key-id
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "energyhistorian.fullname" $ }}-secrets
+                  key: s3-secret-access-key
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+---
+{{- end }}

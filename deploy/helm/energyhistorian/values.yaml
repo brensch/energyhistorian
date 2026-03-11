@@ -1,0 +1,47 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: energyhistorian/energyhistorian
+  tag: latest
+  pullPolicy: IfNotPresent
+
+storageClassName: standard
+
+postgres:
+  image: postgres:16-bookworm
+  database: energyhistorian
+  username: energyhistorian
+  password: energyhistorian
+  storageSize: 20Gi
+
+minio:
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+  mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+  rootUser: minio
+  rootPassword: minio123
+  bucket: historian-raw
+  storageSize: 100Gi
+
+services:
+  scheduler:
+    binary: schedulerd
+    replicaCount: 1
+    port: 8080
+    pollIntervalSecs: 5
+    claimBatchSize: 100
+    maxConcurrency: 8
+  downloader:
+    binary: downloaderd
+    replicaCount: 2
+    port: 8080
+    pollIntervalSecs: 5
+    claimBatchSize: 25
+    maxConcurrency: 4
+  parser:
+    binary: parserd
+    replicaCount: 2
+    port: 8080
+    pollIntervalSecs: 5
+    claimBatchSize: 10
+    maxConcurrency: 4

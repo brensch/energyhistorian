@@ -1,9 +1,13 @@
 [workspace]
 members = [
-  "crates/energyhistoriand",
-  "crates/ingest-core",
-  "crates/source-aemo-dvd",
-  "crates/source-aemo-metadata",
-  "crates/source-nemweb",
+  "apps/downloaderd",
+  "apps/energyhistoriand",
+  "apps/parserd",
+  "apps/schedulerd",
+  "libs/controlplane",
+  "libs/ingest-core",
+  "libs/source-aemo-dvd",
+  "libs/source-aemo-metadata",
+  "libs/source-nemweb",
 ]
 resolver = "2"

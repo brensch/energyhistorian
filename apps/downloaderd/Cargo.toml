@@ -1,0 +1,12 @@
+[package]
+name = "downloaderd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+controlplane = { path = "../../libs/controlplane" }
+tokio = { version = "1.46", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

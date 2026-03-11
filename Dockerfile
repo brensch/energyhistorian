@@ -2,9 +2,14 @@ FROM rust:1.92-bookworm AS builder
 WORKDIR /app
 
 COPY README.md Cargo.toml Cargo.lock ./
-COPY crates ./crates
+COPY apps ./apps
+COPY libs ./libs
 
-RUN cargo build --release --locked --package energyhistoriand
+RUN cargo build --release --locked \
+    --package downloaderd \
+    --package energyhistoriand \
+    --package parserd \
+    --package schedulerd
 
 FROM debian:bookworm-slim AS runtime
 
@@ -14,10 +19,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
+COPY --from=builder /app/target/release/downloaderd /usr/local/bin/downloaderd
 COPY --from=builder /app/target/release/energyhistoriand /usr/local/bin/energyhistoriand
+COPY --from=builder /app/target/release/parserd /usr/local/bin/parserd
+COPY --from=builder /app/target/release/schedulerd /usr/local/bin/schedulerd
 
 RUN mkdir -p /data
 
 EXPOSE 8080
 
-CMD ["/usr/local/bin/energyhistoriand", "--listen-addr", "0.0.0.0:8080", "--state-db", "/data/control-plane.sqlite"]
+CMD ["/usr/local/bin/schedulerd", "--listen-addr", "0.0.0.0:8080"]
