@@ -43,6 +43,7 @@ pub enum TaskTrigger {
 pub struct StoredArtifactRow {
     pub bucket: String,
     pub key: String,
+    pub content_type: Option<String>,
     pub content_sha256: String,
     pub content_length_bytes: i64,
 }
@@ -243,8 +244,8 @@ pub async fn renew_task_lease(
     worker_id: &str,
     lease_duration: Duration,
 ) -> Result<bool> {
-    let lease_expires_at = Utc::now()
-        + TimeDelta::seconds(i64::try_from(lease_duration.as_secs()).unwrap_or(300));
+    let lease_expires_at =
+        Utc::now() + TimeDelta::seconds(i64::try_from(lease_duration.as_secs()).unwrap_or(300));
     let updated = client
         .execute(
             "UPDATE task_queue \
@@ -294,14 +295,15 @@ pub async fn fetch_stored_artifact(
     artifact_id: &str,
 ) -> Result<StoredArtifactRow> {
     let row = client.query_one(
-        "SELECT object_store_bucket, object_store_key, content_sha256, content_length_bytes FROM stored_artifacts WHERE artifact_id = $1",
+        "SELECT object_store_bucket, object_store_key, content_type, content_sha256, content_length_bytes FROM stored_artifacts WHERE artifact_id = $1",
         &[&artifact_id],
     ).await?;
     Ok(StoredArtifactRow {
         bucket: row.get(0),
         key: row.get(1),
-        content_sha256: row.get(2),
-        content_length_bytes: row.get(3),
+        content_type: row.get(2),
+        content_sha256: row.get(3),
+        content_length_bytes: row.get(4),
     })
 }
 
@@ -378,6 +380,7 @@ pub async fn record_fetch_success(
     task: &TaskRecord,
     object_bucket: &str,
     object_key: &str,
+    content_type: &str,
     sha256: &str,
     content_length_bytes: i64,
     etag: Option<&str>,
@@ -389,11 +392,12 @@ pub async fn record_fetch_success(
         .ok_or_else(|| anyhow!("fetch task missing artifact_id"))?;
     client.execute(
         "INSERT INTO stored_artifacts \
-         (artifact_id, object_store_bucket, object_store_key, content_sha256, content_length_bytes, etag, stored_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, NOW()) \
+         (artifact_id, object_store_bucket, object_store_key, content_type, content_sha256, content_length_bytes, etag, stored_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) \
          ON CONFLICT (artifact_id) DO UPDATE \
          SET object_store_bucket = EXCLUDED.object_store_bucket, \
              object_store_key = EXCLUDED.object_store_key, \
+             content_type = EXCLUDED.content_type, \
              content_sha256 = EXCLUDED.content_sha256, \
              content_length_bytes = EXCLUDED.content_length_bytes, \
              etag = EXCLUDED.etag, \
@@ -402,6 +406,7 @@ pub async fn record_fetch_success(
             &artifact_id,
             &object_bucket,
             &object_key,
+            &content_type,
             &sha256,
             &content_length_bytes,
             &etag,

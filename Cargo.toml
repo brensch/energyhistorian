@@ -8,6 +8,7 @@ members = [
   "libs/runtime",
   "libs/source-aemo-dvd",
   "libs/source-aemo-metadata",
+  "libs/source-mmsdm",
   "libs/source-nemweb",
 ]
 resolver = "2"

@@ -12,13 +12,16 @@ pub mod type_inference;
 
 pub use artifact::{ArtifactId, ArtifactKind, ArtifactMetadata, DiscoveredArtifact, LocalArtifact};
 pub use plugin::{
-    CollectionCompletion, CompletionUnit, DiscoveryRequest, ParseResult, PluginCapabilities,
-    PromotionSpec, RawTableChunk, RawTableRow, RawTableRowSink, RunContext, SourceCollection,
-    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    BoxedFuture, CollectionCompletion, CompletionUnit, DiscoveryRequest, ParseResult,
+    PluginCapabilities, PromotionSpec, RawTableChunk, RawTableRow, RawTableRowSink, RunContext,
+    RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection, SourceMetadataDocument,
+    SourcePlugin, TaskBlueprint, TaskKind,
 };
 pub use promotion::{CanonicalDataset, PromotionMapping, PromotionMode};
 pub use raw_plugin::{RawPluginParseResult, RawPluginTableBatch};
-pub use raw_storage::{RawTablePlan, physical_raw_table_name, plan_raw_table};
+pub use raw_storage::{
+    RawTablePlan, physical_raw_table_name, plan_raw_table, plan_raw_table_in_database,
+};
 pub use registry::{PluginCatalog, SourceDescriptor};
 pub use schema::{
     LogicalTableId, ObservedSchema, SchemaApprovalStatus, SchemaColumn, SchemaObservationId,

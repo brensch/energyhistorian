@@ -9,10 +9,11 @@ use std::path::Path;
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use ingest_core::{
-    ArtifactKind, ArtifactMetadata, CollectionCompletion, CompletionUnit, DiscoveredArtifact,
-    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec,
-    RawTableRowSink, RunContext, SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry,
-    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
+    DiscoveredArtifact, DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities,
+    PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
+    SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument,
+    SourcePlugin, TaskBlueprint, TaskKind,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -260,5 +261,51 @@ impl SourcePlugin for NemwebPlugin {
             },
         ];
         PROMOTIONS
+    }
+}
+
+impl RuntimeSourcePlugin for NemwebPlugin {
+    fn parser_version(&self) -> &'static str {
+        "source-nemweb/0.1"
+    }
+
+    fn discover_collection_async<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        collection_id: &'a str,
+        limit: usize,
+        _ctx: &'a RunContext,
+    ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>> {
+        Box::pin(async move { self.discover_collection(client, collection_id, limit).await })
+    }
+
+    fn fetch_artifact_async<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        _collection_id: &'a str,
+        artifact: &'a DiscoveredArtifact,
+        output_dir: &'a Path,
+    ) -> BoxedFuture<'a, Result<LocalArtifact>> {
+        Box::pin(async move { self.fetch_artifact(client, artifact, output_dir).await })
+    }
+
+    fn parse_artifact_runtime(
+        &self,
+        _collection_id: &str,
+        artifact: LocalArtifact,
+        ctx: &RunContext,
+    ) -> Result<RuntimePluginParseResult> {
+        let result = self.inspect_parse(&artifact, ctx)?;
+        Ok(RuntimePluginParseResult::StructuredRaw { artifact, result })
+    }
+
+    fn stream_structured_parse_runtime(
+        &self,
+        artifact: &LocalArtifact,
+        _collection_id: &str,
+        ctx: &RunContext,
+        sink: &mut dyn RawTableRowSink,
+    ) -> Result<()> {
+        self.stream_parse(artifact, ctx, sink)
     }
 }

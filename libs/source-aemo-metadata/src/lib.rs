@@ -10,10 +10,10 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use ingest_core::{
-    CollectionCompletion, CompletionUnit, DiscoveredArtifact, DiscoveryRequest, LocalArtifact,
-    ParseResult, PluginCapabilities, PromotionSpec, RawPluginParseResult, RawTableRowSink,
-    RunContext, SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin,
-    TaskBlueprint, TaskKind,
+    BoxedFuture, CollectionCompletion, CompletionUnit, DiscoveredArtifact, DiscoveryRequest,
+    LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec, RawPluginParseResult,
+    RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection,
+    SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 
 use crate::catalog::AemoCatalog;
@@ -195,6 +195,52 @@ impl SourcePlugin for AemoMetadataHtmlPlugin {
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {
         &[]
+    }
+}
+
+impl RuntimeSourcePlugin for AemoMetadataHtmlPlugin {
+    fn parser_version(&self) -> &'static str {
+        "source-aemo-metadata/0.1"
+    }
+
+    fn discover_collection_async<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        collection_id: &'a str,
+        _limit: usize,
+        ctx: &'a RunContext,
+    ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>> {
+        Box::pin(async move { self.discover_collection(client, collection_id, ctx).await })
+    }
+
+    fn fetch_artifact_async<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        _collection_id: &'a str,
+        artifact: &'a DiscoveredArtifact,
+        output_dir: &'a Path,
+    ) -> BoxedFuture<'a, Result<LocalArtifact>> {
+        Box::pin(async move { self.fetch_artifact(client, artifact, output_dir).await })
+    }
+
+    fn parse_artifact_runtime(
+        &self,
+        collection_id: &str,
+        artifact: LocalArtifact,
+        _ctx: &RunContext,
+    ) -> Result<RuntimePluginParseResult> {
+        let result = self.parse_artifact(collection_id, &artifact)?;
+        Ok(RuntimePluginParseResult::RawMetadata { artifact, result })
+    }
+
+    fn stream_structured_parse_runtime(
+        &self,
+        _artifact: &LocalArtifact,
+        _collection_id: &str,
+        _ctx: &RunContext,
+        _sink: &mut dyn RawTableRowSink,
+    ) -> Result<()> {
+        bail!("metadata HTML source does not stream structured raw rows")
     }
 }
 

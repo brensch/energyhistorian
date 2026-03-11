@@ -1703,6 +1703,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "reqwest",
  "serde",
  "serde_json",
 ]
@@ -2453,11 +2454,13 @@ dependencies = [
  "sha2",
  "source-aemo-dvd",
  "source-aemo-metadata",
+ "source-mmsdm",
  "source-nemweb",
  "tempfile",
  "tokio",
  "tokio-postgres",
  "tracing",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -2895,6 +2898,19 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "source-mmsdm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ingest-core",
+ "regex",
+ "reqwest",
+ "sha2",
+ "source-nemweb",
 ]
 
 [[package]]

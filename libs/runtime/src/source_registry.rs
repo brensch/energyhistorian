@@ -1,14 +1,17 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use ingest_core::{
-    DiscoveredArtifact, LocalArtifact, RawPluginParseResult, RunContext, SourceCollection,
-    SourceDescriptor, SourceMetadataDocument, SourcePlugin,
+    DiscoveredArtifact, LocalArtifact, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
+    SourceCollection, SourceDescriptor, SourceMetadataDocument,
 };
 use serde::Serialize;
 use source_aemo_dvd::AemoMetadataDvdPlugin;
 use source_aemo_metadata::AemoMetadataHtmlPlugin;
+use source_mmsdm::MmsdmPlugin;
 use source_nemweb::NemwebPlugin;
 
 use crate::queue::{CollectionScheduleSeed, stable_stagger_offset_seconds};
@@ -20,23 +23,19 @@ pub struct SourcePlan {
     pub metadata_documents: Vec<SourceMetadataDocument>,
 }
 
+pub type ParsedArtifact = RuntimePluginParseResult;
+
 #[derive(Clone)]
-pub struct SourceRegistry {
-    nemweb: NemwebPlugin,
-    metadata_html: AemoMetadataHtmlPlugin,
-    metadata_dvd: AemoMetadataDvdPlugin,
+struct RegisteredSource {
+    parser_version: String,
+    plan: SourcePlan,
+    implementation: Arc<dyn RuntimeSourcePlugin>,
 }
 
-#[derive(Debug)]
-pub enum ParsedArtifact {
-    Nemweb {
-        artifact: LocalArtifact,
-        result: ingest_core::ParseResult,
-    },
-    RawMetadata {
-        artifact: LocalArtifact,
-        result: RawPluginParseResult,
-    },
+#[derive(Clone)]
+pub struct SourceRegistry {
+    sources: Vec<RegisteredSource>,
+    source_indexes: HashMap<String, usize>,
 }
 
 impl Default for SourceRegistry {
@@ -47,31 +46,22 @@ impl Default for SourceRegistry {
 
 impl SourceRegistry {
     pub fn new() -> Self {
-        Self {
-            nemweb: NemwebPlugin::new(),
-            metadata_html: AemoMetadataHtmlPlugin::new(),
-            metadata_dvd: AemoMetadataDvdPlugin::new(),
-        }
+        let mut registry = Self {
+            sources: Vec::new(),
+            source_indexes: HashMap::new(),
+        };
+        registry.register(NemwebPlugin::new());
+        registry.register(MmsdmPlugin::new());
+        registry.register(AemoMetadataHtmlPlugin::new());
+        registry.register(AemoMetadataDvdPlugin::new());
+        registry
     }
 
     pub fn source_plans(&self) -> Vec<SourcePlan> {
-        vec![
-            SourcePlan {
-                descriptor: self.nemweb.descriptor(),
-                collections: self.nemweb.collections(),
-                metadata_documents: self.nemweb.metadata_catalog(),
-            },
-            SourcePlan {
-                descriptor: self.metadata_html.descriptor(),
-                collections: self.metadata_html.collections(),
-                metadata_documents: self.metadata_html.metadata_catalog(),
-            },
-            SourcePlan {
-                descriptor: self.metadata_dvd.descriptor(),
-                collections: self.metadata_dvd.collections(),
-                metadata_documents: self.metadata_dvd.metadata_catalog(),
-            },
-        ]
+        self.sources
+            .iter()
+            .map(|source| source.plan.clone())
+            .collect()
     }
 
     pub async fn discover(
@@ -81,54 +71,27 @@ impl SourceRegistry {
         collection_id: &str,
         limit: usize,
     ) -> Result<Vec<DiscoveredArtifact>> {
-        match source_id {
-            "aemo.nemweb" => {
-                self.nemweb
-                    .discover_collection(client, collection_id, limit)
-                    .await
-            }
-            "aemo_metadata_html" => {
-                let ctx = run_context("discover", collection_id, "source-aemo-metadata/0.1");
-                self.metadata_html
-                    .discover_collection(client, collection_id, &ctx)
-                    .await
-            }
-            "aemo_metadata_dvd" => {
-                let ctx = run_context("discover", collection_id, "source-aemo-dvd/0.1");
-                self.metadata_dvd
-                    .discover_collection(client, collection_id, &ctx)
-                    .await
-            }
-            _ => bail!("no discover implementation for source '{source_id}'"),
-        }
+        let source = self.source(source_id)?;
+        let ctx = self.run_context(source, "discover", collection_id);
+        source
+            .implementation
+            .discover_collection_async(client, collection_id, limit, &ctx)
+            .await
     }
 
     pub async fn fetch(
         &self,
         client: &reqwest::Client,
         source_id: &str,
-        _collection_id: &str,
+        collection_id: &str,
         artifact: &DiscoveredArtifact,
         output_dir: &Path,
     ) -> Result<LocalArtifact> {
-        match source_id {
-            "aemo.nemweb" => {
-                self.nemweb
-                    .fetch_artifact(client, artifact, output_dir)
-                    .await
-            }
-            "aemo_metadata_html" => {
-                self.metadata_html
-                    .fetch_artifact(client, artifact, output_dir)
-                    .await
-            }
-            "aemo_metadata_dvd" => {
-                self.metadata_dvd
-                    .fetch_artifact(client, artifact, output_dir)
-                    .await
-            }
-            _ => bail!("no fetch implementation for source '{source_id}'"),
-        }
+        let source = self.source(source_id)?;
+        source
+            .implementation
+            .fetch_artifact_async(client, collection_id, artifact, output_dir)
+            .await
     }
 
     pub fn parse(
@@ -137,47 +100,68 @@ impl SourceRegistry {
         collection_id: &str,
         artifact: LocalArtifact,
     ) -> Result<ParsedArtifact> {
-        let ctx = match source_id {
-            "aemo_metadata_html" => run_context("parse", collection_id, "source-aemo-metadata/0.1"),
-            "aemo_metadata_dvd" => run_context("parse", collection_id, "source-aemo-dvd/0.1"),
-            "aemo.nemweb" => run_context("parse", collection_id, "source-nemweb/0.1"),
-            _ => return Err(anyhow!("no parse implementation for source '{source_id}'")),
-        };
-
-        match source_id {
-            "aemo.nemweb" => {
-                let result = self
-                    .nemweb
-                    .inspect_parse(&artifact, &ctx)
-                    .map_err(|error| anyhow!("inspecting nemweb artifact: {error:#}"))?;
-                Ok(ParsedArtifact::Nemweb { artifact, result })
-            }
-            "aemo_metadata_html" => {
-                let result = self
-                    .metadata_html
-                    .parse_artifact(collection_id, &artifact)
-                    .map_err(|error| anyhow!("parsing html metadata artifact: {error:#}"))?;
-                Ok(ParsedArtifact::RawMetadata { artifact, result })
-            }
-            "aemo_metadata_dvd" => {
-                let result = self
-                    .metadata_dvd
-                    .parse_artifact(&artifact)
-                    .map_err(|error| anyhow!("parsing dvd metadata artifact: {error:#}"))?;
-                Ok(ParsedArtifact::RawMetadata { artifact, result })
-            }
-            _ => bail!("no parse implementation for source '{source_id}'"),
-        }
+        let source = self.source(source_id)?;
+        let ctx = self.run_context(source, "parse", collection_id);
+        source
+            .implementation
+            .parse_artifact_runtime(collection_id, artifact, &ctx)
     }
 
-    pub fn stream_nemweb_parse(
+    pub fn stream_structured_parse(
         &self,
+        source_id: &str,
         artifact: &LocalArtifact,
         collection_id: &str,
         sink: &mut dyn ingest_core::RawTableRowSink,
     ) -> Result<()> {
-        let ctx = run_context("parse", collection_id, "source-nemweb/0.1");
-        self.nemweb.stream_parse(artifact, &ctx, sink)
+        let source = self.source(source_id)?;
+        let ctx = self.run_context(source, "parse", collection_id);
+        source
+            .implementation
+            .stream_structured_parse_runtime(artifact, collection_id, &ctx, sink)
+    }
+
+    fn register<P>(&mut self, plugin: P)
+    where
+        P: RuntimeSourcePlugin + 'static,
+    {
+        let implementation: Arc<dyn RuntimeSourcePlugin> = Arc::new(plugin);
+        let plan = SourcePlan {
+            descriptor: implementation.descriptor(),
+            collections: implementation.collections(),
+            metadata_documents: implementation.metadata_catalog(),
+        };
+        let source_id = plan.descriptor.source_id.clone();
+        let parser_version = implementation.parser_version().to_string();
+        let index = self.sources.len();
+        self.source_indexes.insert(source_id, index);
+        self.sources.push(RegisteredSource {
+            parser_version,
+            plan,
+            implementation,
+        });
+    }
+
+    fn source(&self, source_id: &str) -> Result<&RegisteredSource> {
+        let index = self
+            .source_indexes
+            .get(source_id)
+            .copied()
+            .ok_or_else(|| anyhow!("no implementation registered for source '{source_id}'"))?;
+        Ok(&self.sources[index])
+    }
+
+    fn run_context(
+        &self,
+        source: &RegisteredSource,
+        prefix: &str,
+        collection_id: &str,
+    ) -> RunContext {
+        RunContext {
+            run_id: format!("{prefix}-{collection_id}-{}", Utc::now().timestamp_millis()),
+            environment: "service".to_string(),
+            parser_version: source.parser_version.clone(),
+        }
     }
 }
 
@@ -205,12 +189,4 @@ pub fn build_schedule_seeds(source_plans: &[SourcePlan]) -> Vec<CollectionSchedu
                 })
         })
         .collect()
-}
-
-fn run_context(prefix: &str, collection_id: &str, parser_version: &str) -> RunContext {
-    RunContext {
-        run_id: format!("{prefix}-{collection_id}-{}", Utc::now().timestamp_millis()),
-        environment: "service".to_string(),
-        parser_version: parser_version.to_string(),
-    }
 }

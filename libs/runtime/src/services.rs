@@ -313,6 +313,10 @@ async fn execute_fetch_task(
             task,
             &existing.bucket,
             &existing.key,
+            existing
+                .content_type
+                .as_deref()
+                .unwrap_or("application/octet-stream"),
             &existing.content_sha256,
             existing.content_length_bytes,
             None,
@@ -345,12 +349,13 @@ async fn execute_fetch_task(
         artifact_id,
         &local.metadata.acquisition_uri,
     );
-    let stored = object_store.put_file(&key, &local.local_path).await?;
+    let stored = object_store.put_path(&key, &local.local_path).await?;
     record_fetch_success(
         client,
         task,
         &stored.bucket,
         &stored.key,
+        &stored.content_type,
         &stored.sha256,
         stored.content_length_bytes as i64,
         stored.etag.as_deref(),
@@ -411,17 +416,29 @@ async fn execute_parse_task(
             .next()
             .unwrap_or("artifact.bin"),
     );
-    object_store.fetch_to_path(&stored.key, &local_path).await?;
+    let content_type = stored
+        .content_type
+        .as_deref()
+        .unwrap_or("application/octet-stream");
+    let artifact_path = object_store
+        .fetch_to_path(&stored.key, &local_path, content_type)
+        .await?;
     let artifact = LocalArtifact {
         metadata: discovered.metadata,
-        local_path,
+        local_path: artifact_path,
     };
     let parsed = registry.parse(&task.source_id, &task.collection_id, artifact)?;
     match parsed {
-        ParsedArtifact::Nemweb { artifact, result } => {
-            let published =
-                publish_nemweb_rows(publisher, registry, &task.collection_id, &artifact, &result)
-                    .await?;
+        ParsedArtifact::StructuredRaw { artifact, result } => {
+            let published = publish_structured_raw_rows(
+                publisher,
+                registry,
+                &task.source_id,
+                &task.collection_id,
+                &artifact,
+                &result,
+            )
+            .await?;
             record_parse_success(
                 client,
                 task,
@@ -471,30 +488,44 @@ async fn execute_parse_task(
     Ok(())
 }
 
-async fn publish_nemweb_rows(
+async fn publish_structured_raw_rows(
     publisher: &ClickHousePublisher,
     registry: &SourceRegistry,
+    source_id: &str,
     collection_id: &str,
     artifact: &LocalArtifact,
     result: &ingest_core::ParseResult,
 ) -> Result<usize> {
-    publisher.ensure_tables(&result.observed_schemas).await?;
+    publisher
+        .ensure_tables(source_id, collection_id, &result.observed_schemas)
+        .await?;
     let (tx, mut rx) = mpsc::channel::<RawTableRow>(64);
     let artifact2 = artifact.clone();
     let collection_id = collection_id.to_string();
     let parse_collection_id = collection_id.clone();
     let registry2 = registry.clone();
+    let parse_source_id = source_id.to_string();
     let parse_handle = tokio::task::spawn_blocking(move || -> Result<()> {
         let mut sink = ChannelRawTableRowSink { tx };
         registry2
-            .stream_nemweb_parse(&artifact2, &parse_collection_id, &mut sink)
-            .context("streaming nemweb parsed rows")
+            .stream_structured_parse(
+                &parse_source_id,
+                &artifact2,
+                &parse_collection_id,
+                &mut sink,
+            )
+            .with_context(|| {
+                format!(
+                    "streaming structured raw parsed rows for {}",
+                    parse_source_id
+                )
+            })
     });
 
     let mut batcher = ClickHouseRowBatcher::new(
         publisher,
         &result.observed_schemas,
-        &artifact.metadata.source_id,
+        source_id,
         collection_id,
         &artifact.metadata.artifact_id,
         &artifact.metadata.acquisition_uri,
@@ -505,7 +536,9 @@ async fn publish_nemweb_rows(
     while let Some(row) = rx.recv().await {
         batcher.push(row).await?;
     }
-    parse_handle.await.context("joining nemweb parser task")??;
+    parse_handle
+        .await
+        .context("joining structured raw parser task")??;
     batcher.finish().await
 }
 

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use ingest_core::{
-    LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, plan_raw_table,
+    LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, plan_raw_table_in_database,
 };
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
@@ -34,8 +34,6 @@ impl ClickHousePublisher {
 
     pub async fn ensure_ready(&self) -> Result<()> {
         self.execute_sql("SELECT 1").await?;
-        self.execute_sql("CREATE DATABASE IF NOT EXISTS raw")
-            .await?;
         Ok(())
     }
 
@@ -53,7 +51,8 @@ impl ClickHousePublisher {
             .map(|schema| (schema.schema_key.header_hash.clone(), schema))
             .collect::<std::collections::HashMap<_, _>>();
 
-        self.ensure_tables(&result.observed_schemas).await?;
+        self.ensure_tables(source_id, collection_id, &result.observed_schemas)
+            .await?;
 
         let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
         let mut rows_written = 0usize;
@@ -110,9 +109,18 @@ impl ClickHousePublisher {
         Ok(rows_written)
     }
 
-    pub async fn ensure_tables(&self, schemas: &[ObservedSchema]) -> Result<()> {
+    pub async fn ensure_tables(
+        &self,
+        source_id: &str,
+        collection_id: &str,
+        schemas: &[ObservedSchema],
+    ) -> Result<()> {
+        let database = raw_database_name(source_id);
+        self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
+            .await?;
+        self.ensure_observed_schema_tables(&database).await?;
         for schema in schemas {
-            let plan = plan_raw_table(schema);
+            let plan = plan_raw_table_in_database(&database, schema);
             for statement in plan
                 .create_sql
                 .split(';')
@@ -121,6 +129,14 @@ impl ClickHousePublisher {
             {
                 self.execute_sql(statement).await?;
             }
+            self.record_observed_schema(
+                &database,
+                source_id,
+                collection_id,
+                &plan.table_name,
+                schema,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -135,7 +151,7 @@ impl ClickHousePublisher {
         processed_at: &str,
         rows: &[Value],
     ) -> Result<usize> {
-        let plan = plan_raw_table(schema);
+        let plan = plan_raw_table_in_database(&raw_database_name(source_id), schema);
         let prefix = format!("INSERT INTO {} FORMAT JSONEachRow\n", plan.full_name);
         let mut statement = prefix.clone();
         let mut rows_in_batch = 0usize;
@@ -177,6 +193,9 @@ impl ClickHousePublisher {
         table_name: &str,
         rows: &[Value],
     ) -> Result<()> {
+        let database = raw_database_name(source_id);
+        self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
+            .await?;
         let full_name = raw_plugin_table_name(source_id, table_name);
         self.execute_sql(&format!(
             r#"
@@ -192,7 +211,7 @@ impl ClickHousePublisher {
               release_name Nullable(String) CODEC(ZSTD(6)),
               row_json String CODEC(ZSTD(6))
             )
-            ENGINE = ReplacingMergeTree(processed_at)
+            ENGINE = MergeTree
             ORDER BY (artifact_id, cityHash64(row_json))
             SETTINGS compress_marks = true, compress_primary_key = true
             "#
@@ -206,6 +225,118 @@ impl ClickHousePublisher {
             .await?;
         }
 
+        Ok(())
+    }
+
+    async fn ensure_observed_schema_tables(&self, database: &str) -> Result<()> {
+        self.execute_sql(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {database}.observed_schemas (
+              processed_at DateTime64(3) CODEC(Delta(8), LZ4),
+              source_id LowCardinality(String) CODEC(ZSTD(6)),
+              collection_id LowCardinality(String) CODEC(ZSTD(6)),
+              physical_table LowCardinality(String) CODEC(ZSTD(6)),
+              logical_source_family LowCardinality(String) CODEC(ZSTD(6)),
+              logical_section LowCardinality(String) CODEC(ZSTD(6)),
+              logical_table LowCardinality(String) CODEC(ZSTD(6)),
+              report_version LowCardinality(String) CODEC(ZSTD(6)),
+              model_version Nullable(String) CODEC(ZSTD(6)),
+              schema_hash String CODEC(ZSTD(6)),
+              observed_in_artifact_id String CODEC(ZSTD(6)),
+              first_seen_at DateTime64(3) CODEC(Delta(8), LZ4),
+              last_seen_at DateTime64(3) CODEC(Delta(8), LZ4),
+              approval_status LowCardinality(String) CODEC(ZSTD(6)),
+              column_count UInt32 CODEC(ZSTD(6))
+            )
+            ENGINE = MergeTree
+            ORDER BY (logical_table, report_version, schema_hash)
+            SETTINGS compress_marks = true, compress_primary_key = true
+            "#
+        ))
+        .await?;
+        self.execute_sql(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {database}.observed_schema_columns (
+              processed_at DateTime64(3) CODEC(Delta(8), LZ4),
+              source_id LowCardinality(String) CODEC(ZSTD(6)),
+              collection_id LowCardinality(String) CODEC(ZSTD(6)),
+              physical_table LowCardinality(String) CODEC(ZSTD(6)),
+              logical_table LowCardinality(String) CODEC(ZSTD(6)),
+              report_version LowCardinality(String) CODEC(ZSTD(6)),
+              schema_hash String CODEC(ZSTD(6)),
+              ordinal UInt32 CODEC(ZSTD(6)),
+              column_name LowCardinality(String) CODEC(ZSTD(6)),
+              source_data_type Nullable(String) CODEC(ZSTD(6)),
+              nullable Nullable(UInt8) CODEC(ZSTD(6)),
+              primary_key Nullable(UInt8) CODEC(ZSTD(6)),
+              description Nullable(String) CODEC(ZSTD(6))
+            )
+            ENGINE = MergeTree
+            ORDER BY (logical_table, schema_hash, ordinal)
+            SETTINGS compress_marks = true, compress_primary_key = true
+            "#
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn record_observed_schema(
+        &self,
+        database: &str,
+        source_id: &str,
+        collection_id: &str,
+        physical_table: &str,
+        schema: &ObservedSchema,
+    ) -> Result<()> {
+        let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let schema_row = serde_json::to_string(&serde_json::json!({
+            "processed_at": processed_at,
+            "source_id": source_id,
+            "collection_id": collection_id,
+            "physical_table": physical_table,
+            "logical_source_family": schema.schema_key.logical_table.source_family,
+            "logical_section": schema.schema_key.logical_table.section,
+            "logical_table": schema.schema_key.logical_table.table,
+            "report_version": schema.schema_key.report_version,
+            "model_version": schema.schema_key.model_version,
+            "schema_hash": schema.schema_key.header_hash,
+            "observed_in_artifact_id": schema.observed_in_artifact_id,
+            "first_seen_at": schema.first_seen_at.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            "last_seen_at": schema.last_seen_at.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            "approval_status": format!("{:?}", schema.approval_status),
+            "column_count": schema.columns.len() as u32,
+        }))?;
+        self.execute_sql(&format!(
+            "INSERT INTO {database}.observed_schemas FORMAT JSONEachRow\n{schema_row}\n"
+        ))
+        .await?;
+
+        if schema.columns.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert =
+            format!("INSERT INTO {database}.observed_schema_columns FORMAT JSONEachRow\n");
+        for column in &schema.columns {
+            let row = serde_json::to_string(&serde_json::json!({
+                "processed_at": processed_at,
+                "source_id": source_id,
+                "collection_id": collection_id,
+                "physical_table": physical_table,
+                "logical_table": schema.schema_key.logical_table.table,
+                "report_version": schema.schema_key.report_version,
+                "schema_hash": schema.schema_key.header_hash,
+                "ordinal": column.ordinal as u32,
+                "column_name": column.name,
+                "source_data_type": column.source_data_type,
+                "nullable": column.nullable.map(u8::from),
+                "primary_key": column.primary_key.map(u8::from),
+                "description": column.description,
+            }))?;
+            insert.push_str(&row);
+            insert.push('\n');
+        }
+        self.execute_sql(&insert).await?;
         Ok(())
     }
 
@@ -276,10 +407,14 @@ impl ClickHousePublisher {
 
 fn raw_plugin_table_name(source_id: &str, table_name: &str) -> String {
     format!(
-        "raw.{}__{}",
-        sanitize_identifier(source_id),
+        "{}.{}",
+        raw_database_name(source_id),
         sanitize_identifier(table_name)
     )
+}
+
+fn raw_database_name(source_id: &str) -> String {
+    format!("raw_{}", sanitize_identifier(source_id))
 }
 
 fn raw_plugin_column_names(rows: &[Value]) -> Vec<String> {

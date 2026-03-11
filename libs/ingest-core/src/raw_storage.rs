@@ -9,7 +9,11 @@ pub struct RawTablePlan {
 }
 
 pub fn plan_raw_table(schema: &ObservedSchema) -> RawTablePlan {
-    let database = "raw".to_string();
+    plan_raw_table_in_database("raw", schema)
+}
+
+pub fn plan_raw_table_in_database(database: &str, schema: &ObservedSchema) -> RawTablePlan {
+    let database = database.to_string();
     let table_name = physical_raw_table_name(schema);
     let full_name = format!("{database}.{table_name}");
 

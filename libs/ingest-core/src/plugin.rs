@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -6,6 +9,7 @@ use serde_json::Value;
 
 use crate::artifact::{DiscoveredArtifact, LocalArtifact};
 use crate::promotion::PromotionMapping;
+use crate::raw_plugin::RawPluginParseResult;
 use crate::registry::SourceDescriptor;
 use crate::schema::ObservedSchema;
 
@@ -135,6 +139,8 @@ pub trait RawTableRowSink {
     fn accept(&mut self, row: RawTableRow) -> Result<()>;
 }
 
+pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 #[derive(Default)]
 struct CollectingRawTableRowSink {
     order: Vec<(String, String)>,
@@ -215,4 +221,51 @@ pub trait SourcePlugin {
             .map(|collection| collection.task_blueprints)
             .unwrap_or_default()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RuntimePluginParseResult {
+    StructuredRaw {
+        artifact: LocalArtifact,
+        result: ParseResult,
+    },
+    RawMetadata {
+        artifact: LocalArtifact,
+        result: RawPluginParseResult,
+    },
+}
+
+pub trait RuntimeSourcePlugin: SourcePlugin + Send + Sync {
+    fn parser_version(&self) -> &'static str;
+
+    fn discover_collection_async<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        collection_id: &'a str,
+        limit: usize,
+        ctx: &'a RunContext,
+    ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>>;
+
+    fn fetch_artifact_async<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        collection_id: &'a str,
+        artifact: &'a DiscoveredArtifact,
+        output_dir: &'a Path,
+    ) -> BoxedFuture<'a, Result<LocalArtifact>>;
+
+    fn parse_artifact_runtime(
+        &self,
+        collection_id: &str,
+        artifact: LocalArtifact,
+        ctx: &RunContext,
+    ) -> Result<RuntimePluginParseResult>;
+
+    fn stream_structured_parse_runtime(
+        &self,
+        artifact: &LocalArtifact,
+        collection_id: &str,
+        ctx: &RunContext,
+        sink: &mut dyn RawTableRowSink,
+    ) -> Result<()>;
 }
