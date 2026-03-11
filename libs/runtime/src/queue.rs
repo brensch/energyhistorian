@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::future::poll_fn;
-use ingest_core::DiscoveredArtifact;
+use ingest_core::{DiscoveredArtifact, DiscoveryCursorHint};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -304,6 +304,32 @@ pub async fn fetch_stored_artifact(
         content_type: row.get(2),
         content_sha256: row.get(3),
         content_length_bytes: row.get(4),
+    })
+}
+
+pub async fn fetch_discovery_cursor_hint(
+    client: &Client,
+    source_id: &str,
+    collection_id: &str,
+) -> Result<DiscoveryCursorHint> {
+    let row = client
+        .query_opt(
+            "SELECT publication_timestamp, artifact_metadata_json->>'release_name' AS release_name \
+             FROM discovered_artifacts \
+             WHERE source_id = $1 AND collection_id = $2 \
+             ORDER BY COALESCE(artifact_metadata_json->>'release_name', '') DESC, \
+                      publication_timestamp DESC NULLS LAST, \
+                      discovered_at DESC \
+             LIMIT 1",
+            &[&source_id, &collection_id],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(DiscoveryCursorHint::default());
+    };
+    Ok(DiscoveryCursorHint {
+        latest_publication_timestamp: row.get(0),
+        latest_release_name: row.get(1),
     })
 }
 

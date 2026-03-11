@@ -20,6 +20,12 @@ pub struct RunContext {
     pub parser_version: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoveryCursorHint {
+    pub latest_publication_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub latest_release_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCapabilities {
     pub supports_backfill: bool,
@@ -243,6 +249,7 @@ pub trait RuntimeSourcePlugin: SourcePlugin + Send + Sync {
         client: &'a reqwest::Client,
         collection_id: &'a str,
         limit: usize,
+        cursor: &'a DiscoveryCursorHint,
         ctx: &'a RunContext,
     ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>>;
 

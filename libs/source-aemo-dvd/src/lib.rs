@@ -198,6 +198,7 @@ impl RuntimeSourcePlugin for AemoMetadataDvdPlugin {
         client: &'a reqwest::Client,
         collection_id: &'a str,
         _limit: usize,
+        _cursor: &'a ingest_core::DiscoveryCursorHint,
         ctx: &'a RunContext,
     ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>> {
         Box::pin(async move { self.discover_collection(client, collection_id, ctx).await })

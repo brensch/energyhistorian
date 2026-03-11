@@ -274,6 +274,7 @@ impl RuntimeSourcePlugin for NemwebPlugin {
         client: &'a reqwest::Client,
         collection_id: &'a str,
         limit: usize,
+        _cursor: &'a ingest_core::DiscoveryCursorHint,
         _ctx: &'a RunContext,
     ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>> {
         Box::pin(async move { self.discover_collection(client, collection_id, limit).await })

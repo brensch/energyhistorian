@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use ingest_core::{
-    DiscoveredArtifact, LocalArtifact, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
-    SourceCollection, SourceDescriptor, SourceMetadataDocument,
+    DiscoveredArtifact, DiscoveryCursorHint, LocalArtifact, RunContext, RuntimePluginParseResult,
+    RuntimeSourcePlugin, SourceCollection, SourceDescriptor, SourceMetadataDocument,
 };
 use serde::Serialize;
 use source_aemo_dvd::AemoMetadataDvdPlugin;
@@ -70,12 +70,13 @@ impl SourceRegistry {
         source_id: &str,
         collection_id: &str,
         limit: usize,
+        cursor: &DiscoveryCursorHint,
     ) -> Result<Vec<DiscoveredArtifact>> {
         let source = self.source(source_id)?;
         let ctx = self.run_context(source, "discover", collection_id);
         source
             .implementation
-            .discover_collection_async(client, collection_id, limit, &ctx)
+            .discover_collection_async(client, collection_id, limit, cursor, &ctx)
             .await
     }
 

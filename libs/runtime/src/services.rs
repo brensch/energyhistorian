@@ -14,10 +14,11 @@ use crate::clickhouse::{ClickHouseConfig, ClickHousePublisher, MAX_INSERT_BYTES,
 use crate::object_store::ObjectStore;
 use crate::queue::{
     CollectionScheduleSeed, TaskRecord, claim_tasks, complete_task, connect_listener,
-    enqueue_due_discover_tasks, fail_task, fetch_discovered_artifact, fetch_stored_artifact,
-    mark_discover_failure, mark_discover_success, parse_already_succeeded, record_discoveries,
-    record_fetch_success, record_parse_success, renew_task_lease, requeue_expired_leases,
-    sync_collection_schedules, try_acquire_scheduler_leadership, wait_for_trigger,
+    enqueue_due_discover_tasks, fail_task, fetch_discovered_artifact, fetch_discovery_cursor_hint,
+    fetch_stored_artifact, mark_discover_failure, mark_discover_success, parse_already_succeeded,
+    record_discoveries, record_fetch_success, record_parse_success, renew_task_lease,
+    requeue_expired_leases, sync_collection_schedules, try_acquire_scheduler_leadership,
+    wait_for_trigger,
 };
 use crate::source_registry::{ParsedArtifact, SourceRegistry};
 
@@ -281,8 +282,15 @@ async fn execute_discover_task(
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(10) as usize;
+    let cursor = fetch_discovery_cursor_hint(client, &task.source_id, &task.collection_id).await?;
     let discoveries = registry
-        .discover(http_client, &task.source_id, &task.collection_id, limit)
+        .discover(
+            http_client,
+            &task.source_id,
+            &task.collection_id,
+            limit,
+            &cursor,
+        )
         .await?;
     record_discoveries(client, &task.source_id, &task.collection_id, &discoveries).await?;
     Ok(())

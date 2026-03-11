@@ -12,10 +12,10 @@ pub mod type_inference;
 
 pub use artifact::{ArtifactId, ArtifactKind, ArtifactMetadata, DiscoveredArtifact, LocalArtifact};
 pub use plugin::{
-    BoxedFuture, CollectionCompletion, CompletionUnit, DiscoveryRequest, ParseResult,
-    PluginCapabilities, PromotionSpec, RawTableChunk, RawTableRow, RawTableRowSink, RunContext,
-    RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection, SourceMetadataDocument,
-    SourcePlugin, TaskBlueprint, TaskKind,
+    BoxedFuture, CollectionCompletion, CompletionUnit, DiscoveryCursorHint, DiscoveryRequest,
+    ParseResult, PluginCapabilities, PromotionSpec, RawTableChunk, RawTableRow, RawTableRowSink,
+    RunContext, RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection,
+    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 pub use promotion::{CanonicalDataset, PromotionMapping, PromotionMode};
 pub use raw_plugin::{RawPluginParseResult, RawPluginTableBatch};
