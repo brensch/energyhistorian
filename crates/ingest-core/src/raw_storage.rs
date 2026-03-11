@@ -67,22 +67,15 @@ pub fn plan_raw_table(schema: &ObservedSchema) -> RawTablePlan {
 
 pub fn physical_raw_table_name(schema: &ObservedSchema) -> String {
     let logical = &schema.schema_key.logical_table;
-    let model_version = schema
-        .schema_key
-        .model_version
-        .clone()
-        .unwrap_or_else(|| "unknown_model".to_string());
     let report_version = sanitize_part(&schema.schema_key.report_version);
-    let model_part = sanitize_part(&model_version);
     let hash_prefix = &schema.schema_key.header_hash[..12.min(schema.schema_key.header_hash.len())];
 
     format!(
-        "{}__{}__{}__v{}__m_{}__h_{}",
+        "{}__{}__{}__v{}__h_{}",
         sanitize_part(&logical.source_family),
         sanitize_part(&logical.section),
         sanitize_part(&logical.table),
         report_version,
-        model_part,
         hash_prefix
     )
 }

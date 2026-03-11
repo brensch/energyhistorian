@@ -10,9 +10,11 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, DiscoveredArtifact, FileSchemaRegistry, LocalArtifact,
-    ObservedSchema, RawTableRow, RawTableRowSink, RunContext, SourcePlugin,
+    ObservedSchema, RawPluginParseResult, RawTableRow, RawTableRowSink, RunContext, SourcePlugin,
 };
 use rusqlite::Connection;
+use source_aemo_dvd::AemoMetadataDvdPlugin;
+use source_aemo_metadata::AemoMetadataHtmlPlugin;
 use source_nemweb::NemwebPlugin;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -55,6 +57,8 @@ pub async fn run(
         .expect("build HTTP client");
     let publisher = ClickHousePublisher::new(clickhouse).expect("build clickhouse publisher");
     let nemweb = NemwebPlugin::new();
+    let metadata_html = AemoMetadataHtmlPlugin::new();
+    let metadata_dvd = AemoMetadataDvdPlugin::new();
 
     info!(worker_id = %worker_id, "scheduler started");
 
@@ -64,6 +68,8 @@ pub async fn run(
             &worker_id,
             &client,
             &nemweb,
+            &metadata_html,
+            &metadata_dvd,
             &raw_dir,
             &parsed_dir,
             &schema_registry_dir,
@@ -83,6 +89,8 @@ async fn tick(
     worker_id: &str,
     client: &reqwest::Client,
     nemweb: &NemwebPlugin,
+    metadata_html: &AemoMetadataHtmlPlugin,
+    metadata_dvd: &AemoMetadataDvdPlugin,
     raw_dir: &Path,
     parsed_dir: &Path,
     schema_dir: &Path,
@@ -110,6 +118,8 @@ async fn tick(
         let db2 = db.clone();
         let client2 = client.clone();
         let nemweb2 = nemweb.clone();
+        let metadata_html2 = metadata_html.clone();
+        let metadata_dvd2 = metadata_dvd.clone();
         let raw2 = raw_dir.to_path_buf();
         let parsed2 = parsed_dir.to_path_buf();
         let schema2 = schema_dir.to_path_buf();
@@ -121,6 +131,8 @@ async fn tick(
                 &task,
                 &client2,
                 &nemweb2,
+                &metadata_html2,
+                &metadata_dvd2,
                 &db2,
                 &raw2,
                 &parsed2,
@@ -332,6 +344,8 @@ async fn execute_task(
     task: &TaskRow,
     client: &reqwest::Client,
     nemweb: &NemwebPlugin,
+    metadata_html: &AemoMetadataHtmlPlugin,
+    metadata_dvd: &AemoMetadataDvdPlugin,
     db: &Arc<Mutex<Connection>>,
     raw_dir: &Path,
     parsed_dir: &Path,
@@ -340,9 +354,43 @@ async fn execute_task(
     schedule_seeds: &[CollectionScheduleSeed],
 ) -> Result<String> {
     match task.task_kind.as_str() {
-        "discover" => exec_discover(task, client, nemweb, db, schedule_seeds).await,
-        "fetch" => exec_fetch(task, client, nemweb, db, raw_dir).await,
-        "parse" => exec_parse(task, nemweb, db, parsed_dir, schema_dir, publisher).await,
+        "discover" => {
+            exec_discover(
+                task,
+                client,
+                nemweb,
+                metadata_html,
+                metadata_dvd,
+                db,
+                schedule_seeds,
+            )
+            .await
+        }
+        "fetch" => {
+            exec_fetch(
+                task,
+                client,
+                nemweb,
+                metadata_html,
+                metadata_dvd,
+                db,
+                raw_dir,
+            )
+            .await
+        }
+        "parse" => {
+            exec_parse(
+                task,
+                nemweb,
+                metadata_html,
+                metadata_dvd,
+                db,
+                parsed_dir,
+                schema_dir,
+                publisher,
+            )
+            .await
+        }
         kind => anyhow::bail!("no executor for task kind '{kind}'"),
     }
 }
@@ -351,6 +399,8 @@ async fn exec_discover(
     task: &TaskRow,
     client: &reqwest::Client,
     nemweb: &NemwebPlugin,
+    metadata_html: &AemoMetadataHtmlPlugin,
+    metadata_dvd: &AemoMetadataDvdPlugin,
     db: &Arc<Mutex<Connection>>,
     schedule_seeds: &[CollectionScheduleSeed],
 ) -> Result<String> {
@@ -360,25 +410,63 @@ async fn exec_discover(
             .discover_collection(client, &task.collection_id, DISCOVER_LIMIT)
             .await
             .context("nemweb discover")?,
+        "aemo_metadata_html" => {
+            let ctx = RunContext {
+                run_id: format!(
+                    "discover-{}-{}",
+                    task.collection_id,
+                    Utc::now().timestamp_millis()
+                ),
+                environment: "service".to_string(),
+                parser_version: "source-aemo-metadata/0.1".to_string(),
+            };
+            metadata_html
+                .discover_collection(client, &task.collection_id, &ctx)
+                .await
+                .context("html metadata discover")?
+        }
+        "aemo_metadata_dvd" => {
+            let ctx = RunContext {
+                run_id: format!(
+                    "discover-{}-{}",
+                    task.collection_id,
+                    Utc::now().timestamp_millis()
+                ),
+                environment: "service".to_string(),
+                parser_version: "source-aemo-dvd/0.1".to_string(),
+            };
+            metadata_dvd
+                .discover_collection(client, &task.collection_id, &ctx)
+                .await
+                .context("dvd metadata discover")?
+        }
         src => anyhow::bail!("no discover implementation for source '{src}'"),
     };
 
     // Generic: hand to pipeline
     let discoveries: Vec<pipeline::Discovery> = artifacts
         .iter()
-        .map(|a| pipeline::Discovery {
-            artifact_id: stable_artifact_id(&task.source_id, &a.metadata.acquisition_uri),
-            remote_uri: a.metadata.acquisition_uri.clone(),
+        .map(|a| -> Result<pipeline::Discovery> {
+            Ok(pipeline::Discovery {
+                artifact_id: a.metadata.artifact_id.clone(),
+                remote_uri: a.metadata.acquisition_uri.clone(),
+                artifact_metadata: serde_json::to_value(&a.metadata)
+                    .context("serializing discovered artifact metadata")?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let conn = db.lock().expect("mutex");
     let outcome =
         pipeline::record_discoveries(&conn, &task.source_id, &task.collection_id, &discoveries);
     let next_run_at =
         collection_next_discovery_at(schedule_seeds, &task.source_id, &task.collection_id);
-    let scheduled =
-        pipeline::schedule_next_discovery(&conn, &task.source_id, &task.collection_id, &next_run_at);
+    let scheduled = pipeline::schedule_next_discovery(
+        &conn,
+        &task.source_id,
+        &task.collection_id,
+        &next_run_at,
+    );
     schedule_state::note_discover_scheduled(
         &conn,
         &task.source_id,
@@ -393,12 +481,16 @@ async fn exec_fetch(
     task: &TaskRow,
     client: &reqwest::Client,
     nemweb: &NemwebPlugin,
+    metadata_html: &AemoMetadataHtmlPlugin,
+    metadata_dvd: &AemoMetadataDvdPlugin,
     db: &Arc<Mutex<Connection>>,
     raw_dir: &Path,
 ) -> Result<String> {
     let payload = parse_payload(&task.payload_json)?;
     let artifact_id = require_str(&payload, "artifact_id")?;
     let remote_uri = require_str(&payload, "remote_uri")?;
+    let discovered: ArtifactMetadata =
+        artifact_metadata_from_payload(&payload, task, artifact_id, remote_uri)?;
 
     // Generic: skip if already done
     {
@@ -412,20 +504,7 @@ async fn exec_fetch(
     let local = match task.source_id.as_str() {
         "aemo.nemweb" => {
             let discovered = DiscoveredArtifact {
-                metadata: ArtifactMetadata {
-                    artifact_id: artifact_id.to_string(),
-                    source_id: task.collection_id.clone(),
-                    acquisition_uri: remote_uri.to_string(),
-                    discovered_at: Utc::now(),
-                    fetched_at: None,
-                    published_at: None,
-                    content_sha256: None,
-                    content_length_bytes: None,
-                    kind: ArtifactKind::ZipArchive,
-                    parser_version: "source-nemweb/0.1".to_string(),
-                    model_version: None,
-                    release_name: None,
-                },
+                metadata: discovered,
             };
             let dir = raw_dir.join(&task.collection_id);
             std::fs::create_dir_all(&dir)?;
@@ -433,6 +512,28 @@ async fn exec_fetch(
                 .fetch_artifact(client, &discovered, &dir)
                 .await
                 .context("downloading archive")?
+        }
+        "aemo_metadata_html" => {
+            let discovered = DiscoveredArtifact {
+                metadata: discovered,
+            };
+            let dir = raw_dir.join("aemo_metadata_html").join(&task.collection_id);
+            std::fs::create_dir_all(&dir)?;
+            metadata_html
+                .fetch_artifact(client, &discovered, &dir)
+                .await
+                .context("downloading html metadata artifact")?
+        }
+        "aemo_metadata_dvd" => {
+            let discovered = DiscoveredArtifact {
+                metadata: discovered,
+            };
+            let dir = raw_dir.join("aemo_metadata_dvd").join(&task.collection_id);
+            std::fs::create_dir_all(&dir)?;
+            metadata_dvd
+                .fetch_artifact(client, &discovered, &dir)
+                .await
+                .context("downloading dvd metadata artifact")?
         }
         src => anyhow::bail!("no fetch implementation for source '{src}'"),
     };
@@ -454,6 +555,8 @@ async fn exec_fetch(
 async fn exec_parse(
     task: &TaskRow,
     nemweb: &NemwebPlugin,
+    metadata_html: &AemoMetadataHtmlPlugin,
+    metadata_dvd: &AemoMetadataDvdPlugin,
     db: &Arc<Mutex<Connection>>,
     _parsed_dir: &Path,
     schema_dir: &Path,
@@ -463,6 +566,8 @@ async fn exec_parse(
     let artifact_id = require_str(&payload, "artifact_id")?;
     let local_path = require_str(&payload, "local_path")?;
     let remote_uri = payload["remote_uri"].as_str().unwrap_or("");
+    let artifact_metadata =
+        artifact_metadata_from_payload(&payload, task, artifact_id, remote_uri)?;
 
     let ctx = RunContext {
         run_id: format!(
@@ -471,84 +576,119 @@ async fn exec_parse(
             Utc::now().timestamp_millis()
         ),
         environment: "service".to_string(),
-        parser_version: "source-nemweb/0.1".to_string(),
+        parser_version: if task.source_id == "aemo_metadata_html" {
+            "source-aemo-metadata/0.1".to_string()
+        } else if task.source_id == "aemo_metadata_dvd" {
+            "source-aemo-dvd/0.1".to_string()
+        } else {
+            "source-nemweb/0.1".to_string()
+        },
     };
 
     // Source-specific: parse the artifact
-    let (artifact, result) = match task.source_id.as_str() {
+    let parse_outcome = match task.source_id.as_str() {
         "aemo.nemweb" => {
             let artifact = LocalArtifact {
-                metadata: ArtifactMetadata {
-                    artifact_id: artifact_id.to_string(),
-                    source_id: task.collection_id.clone(),
-                    acquisition_uri: remote_uri.to_string(),
-                    discovered_at: Utc::now(),
-                    fetched_at: Some(Utc::now()),
-                    published_at: None,
-                    content_sha256: None,
-                    content_length_bytes: None,
-                    kind: ArtifactKind::ZipArchive,
-                    parser_version: "source-nemweb/0.1".to_string(),
-                    model_version: None,
-                    release_name: None,
-                },
+                metadata: artifact_metadata,
                 local_path: PathBuf::from(local_path),
             };
             let inspected = nemweb
                 .inspect_parse(&artifact, &ctx)
                 .context("inspecting archive for schemas and counts")?;
-            (artifact, inspected)
+            ParsedArtifact::Nemweb {
+                artifact,
+                result: inspected,
+            }
+        }
+        "aemo_metadata_html" => {
+            let artifact = LocalArtifact {
+                metadata: artifact_metadata,
+                local_path: PathBuf::from(local_path),
+            };
+            let result = metadata_html
+                .parse_artifact(&task.collection_id, &artifact)
+                .context("parsing html metadata artifact")?;
+            ParsedArtifact::RawPluginMetadata { artifact, result }
+        }
+        "aemo_metadata_dvd" => {
+            let artifact = LocalArtifact {
+                metadata: artifact_metadata,
+                local_path: PathBuf::from(local_path),
+            };
+            let result = metadata_dvd
+                .parse_artifact(&artifact)
+                .context("parsing dvd metadata artifact")?;
+            ParsedArtifact::RawPluginMetadata { artifact, result }
         }
         src => anyhow::bail!("no parse implementation for source '{src}'"),
     };
 
-    publisher
-        .ensure_tables(&result.observed_schemas)
-        .await
-        .context("preparing clickhouse raw tables")?;
+    match parse_outcome {
+        ParsedArtifact::Nemweb { artifact, result } => {
+            publisher
+                .ensure_tables(&result.observed_schemas)
+                .await
+                .context("preparing clickhouse raw tables")?;
 
-    let (tx, mut rx) = mpsc::channel::<RawTableRow>(64);
-    let artifact2 = artifact.clone();
-    let ctx2 = ctx.clone();
-    let nemweb2 = nemweb.clone();
-    let parse_handle = tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut sink = ChannelRawTableRowSink { tx };
-        nemweb2
-            .stream_parse(&artifact2, &ctx2, &mut sink)
-            .context("streaming parsed rows")
-    });
+            let (tx, mut rx) = mpsc::channel::<RawTableRow>(64);
+            let artifact2 = artifact.clone();
+            let ctx2 = ctx.clone();
+            let nemweb2 = nemweb.clone();
+            let parse_handle = tokio::task::spawn_blocking(move || -> Result<()> {
+                let mut sink = ChannelRawTableRowSink { tx };
+                nemweb2
+                    .stream_parse(&artifact2, &ctx2, &mut sink)
+                    .context("streaming parsed rows")
+            });
 
-    let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    let mut batcher = ClickHouseRowBatcher::new(
-        publisher,
-        &result.observed_schemas,
-        &task.source_id,
-        &task.collection_id,
-        artifact_id,
-        remote_uri,
-        processed_at,
-    );
-    while let Some(row) = rx.recv().await {
-        batcher.push(row).await?;
+            let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            let mut batcher = ClickHouseRowBatcher::new(
+                publisher,
+                &result.observed_schemas,
+                &task.source_id,
+                &task.collection_id,
+                artifact_id,
+                remote_uri,
+                processed_at,
+            );
+            while let Some(row) = rx.recv().await {
+                batcher.push(row).await?;
+            }
+            parse_handle.await.context("joining parser stream task")??;
+            let published_rows = batcher.finish().await?;
+
+            let registry = FileSchemaRegistry::new(schema_dir.join("nemweb.schemas.json"));
+            let conn = db.lock().expect("mutex");
+            let outcome = pipeline::record_parse(
+                &conn,
+                &task.source_id,
+                &task.collection_id,
+                artifact_id,
+                &result,
+                &registry,
+            )?;
+
+            Ok(format!(
+                "{artifact_id}: {outcome}; clickhouse rows={published_rows}"
+            ))
+        }
+        ParsedArtifact::RawPluginMetadata { artifact, result } => {
+            let published_rows = publisher
+                .publish_raw_plugin_parse_result(
+                    &task.source_id,
+                    &task.collection_id,
+                    &artifact,
+                    &result,
+                )
+                .await
+                .context("publishing raw metadata rows")?;
+            let conn = db.lock().expect("mutex");
+            pipeline::record_publication(&conn, &task.source_id, &task.collection_id, artifact_id);
+            Ok(format!(
+                "{artifact_id}: raw metadata rows published={published_rows}"
+            ))
+        }
     }
-    parse_handle.await.context("joining parser stream task")??;
-    let published_rows = batcher.finish().await?;
-
-    // Generic: record schemas and update status
-    let registry = FileSchemaRegistry::new(schema_dir.join("nemweb.schemas.json"));
-    let conn = db.lock().expect("mutex");
-    let outcome = pipeline::record_parse(
-        &conn,
-        &task.source_id,
-        &task.collection_id,
-        artifact_id,
-        &result,
-        &registry,
-    )?;
-
-    Ok(format!(
-        "{artifact_id}: {outcome}; clickhouse rows={published_rows}"
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -678,18 +818,62 @@ impl<'a> ClickHouseRowBatcher<'a> {
     }
 }
 
-fn stable_artifact_id(source_id: &str, url: &str) -> String {
-    let filename = url.rsplit('/').next().unwrap_or(url);
-    let name = filename.strip_suffix(".zip").unwrap_or(filename);
-    format!("{source_id}:{name}")
-}
-
 fn parse_payload(json: &Option<String>) -> Result<serde_json::Value> {
     json.as_deref()
         .map(serde_json::from_str)
         .transpose()
         .context("invalid task payload JSON")
         .map(|v| v.unwrap_or(serde_json::Value::Null))
+}
+
+fn artifact_metadata_from_payload(
+    payload: &serde_json::Value,
+    task: &TaskRow,
+    artifact_id: &str,
+    remote_uri: &str,
+) -> Result<ArtifactMetadata> {
+    if !payload["artifact"].is_null() {
+        return serde_json::from_value(payload["artifact"].clone())
+            .context("deserializing artifact metadata from task payload");
+    }
+
+    Ok(ArtifactMetadata {
+        artifact_id: artifact_id.to_string(),
+        source_id: task.source_id.clone(),
+        acquisition_uri: remote_uri.to_string(),
+        discovered_at: Utc::now(),
+        fetched_at: None,
+        published_at: None,
+        content_sha256: None,
+        content_length_bytes: None,
+        kind: if task.source_id == "aemo_metadata_html" {
+            ArtifactKind::HtmlDocument
+        } else if task.source_id == "aemo_metadata_dvd" {
+            ArtifactKind::ZipArchive
+        } else {
+            ArtifactKind::ZipArchive
+        },
+        parser_version: if task.source_id == "aemo_metadata_html" {
+            "source-aemo-metadata/0.1".to_string()
+        } else if task.source_id == "aemo_metadata_dvd" {
+            "source-aemo-dvd/0.1".to_string()
+        } else {
+            "source-nemweb/0.1".to_string()
+        },
+        model_version: None,
+        release_name: None,
+    })
+}
+
+enum ParsedArtifact {
+    Nemweb {
+        artifact: LocalArtifact,
+        result: ingest_core::ParseResult,
+    },
+    RawPluginMetadata {
+        artifact: LocalArtifact,
+        result: RawPluginParseResult,
+    },
 }
 
 fn require_str<'a>(payload: &'a serde_json::Value, field: &str) -> Result<&'a str> {

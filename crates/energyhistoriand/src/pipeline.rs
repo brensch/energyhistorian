@@ -21,6 +21,7 @@ use crate::schedule_state::ScheduledTask;
 pub struct Discovery {
     pub artifact_id: String,
     pub remote_uri: String,
+    pub artifact_metadata: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +153,7 @@ pub fn record_discoveries(
             let payload = serde_json::json!({
                 "artifact_id": d.artifact_id,
                 "remote_uri": d.remote_uri,
+                "artifact": d.artifact_metadata,
             });
             let created = enqueue_task(
                 conn,
@@ -252,6 +254,7 @@ pub fn record_fetch(
         artifact_id,
         remote_uri,
         &local.local_path.display().to_string(),
+        serde_json::to_value(&local.metadata).unwrap_or(serde_json::Value::Null),
     );
 
     FetchOutcome {
@@ -313,6 +316,37 @@ pub fn record_parse(
     })
 }
 
+pub fn record_publication(
+    conn: &Connection,
+    source_id: &str,
+    collection_id: &str,
+    artifact_id: &str,
+) {
+    conn.execute(
+        "UPDATE discovered_artifacts SET status = 'published', published_at = ?1 WHERE artifact_id = ?2",
+        rusqlite::params![Utc::now().to_rfc3339(), artifact_id],
+    )
+    .ok();
+
+    conn.execute(
+        "INSERT INTO artifact_publications \
+         (artifact_id, source_id, collection_id, status, created_at, updated_at, published_at) \
+         VALUES (?1, ?2, ?3, 'published', ?4, ?4, ?4) \
+         ON CONFLICT(artifact_id) DO UPDATE SET \
+             status = excluded.status, \
+             updated_at = excluded.updated_at, \
+             published_at = excluded.published_at, \
+             last_error = NULL",
+        rusqlite::params![
+            artifact_id,
+            source_id,
+            collection_id,
+            Utc::now().to_rfc3339(),
+        ],
+    )
+    .ok();
+}
+
 pub fn requeue_unpublished_artifacts(conn: &Connection) -> usize {
     let mut stmt = match conn.prepare(
         "SELECT d.artifact_id, d.source_id, d.collection_id, d.remote_uri, f.local_path \
@@ -349,6 +383,7 @@ pub fn requeue_unpublished_artifacts(conn: &Connection) -> usize {
             &artifact_id,
             &remote_uri,
             &local_path,
+            serde_json::Value::Null,
         );
     }
 
@@ -391,12 +426,14 @@ fn enqueue_parse_task(
     artifact_id: &str,
     remote_uri: &str,
     local_path: &str,
+    artifact_metadata: serde_json::Value,
 ) -> usize {
     let parse_id = format!("{source_id}:{collection_id}:parse:{artifact_id}");
     let payload = serde_json::json!({
         "artifact_id": artifact_id,
         "remote_uri": remote_uri,
         "local_path": local_path,
+        "artifact": artifact_metadata,
     });
     enqueue_task(
         conn,

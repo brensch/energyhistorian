@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
-use ingest_core::{ObservedSchema, ParseResult, plan_raw_table};
+use ingest_core::{
+    LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, plan_raw_table,
+};
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
 
@@ -93,6 +95,35 @@ impl ClickHousePublisher {
         Ok(())
     }
 
+    pub async fn publish_raw_plugin_parse_result(
+        &self,
+        source_id: &str,
+        collection_id: &str,
+        artifact: &LocalArtifact,
+        result: &RawPluginParseResult,
+    ) -> Result<usize> {
+        let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let mut rows_written = 0usize;
+        for batch in &result.tables {
+            if batch.rows.is_empty() {
+                continue;
+            }
+            self.ensure_raw_plugin_table(source_id, &batch.table_name, &batch.rows)
+                .await?;
+            rows_written += self
+                .insert_raw_plugin_rows(
+                    source_id,
+                    collection_id,
+                    artifact,
+                    &batch.table_name,
+                    &processed_at,
+                    &batch.rows,
+                )
+                .await?;
+        }
+        Ok(rows_written)
+    }
+
     pub async fn publish_raw_chunk(
         &self,
         schema: &ObservedSchema,
@@ -175,6 +206,87 @@ impl ClickHousePublisher {
         Ok(())
     }
 
+    async fn ensure_raw_plugin_table(
+        &self,
+        source_id: &str,
+        table_name: &str,
+        rows: &[Value],
+    ) -> Result<()> {
+        let full_name = raw_plugin_table_name(source_id, table_name);
+        self.execute_sql(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {full_name} (
+              processed_at DateTime64(3) CODEC(Delta(8), LZ4),
+              artifact_id String CODEC(ZSTD(6)),
+              source_id LowCardinality(String) CODEC(ZSTD(6)),
+              collection_id LowCardinality(String) CODEC(ZSTD(6)),
+              source_url String CODEC(ZSTD(6)),
+              local_path String CODEC(ZSTD(6)),
+              content_sha256 String CODEC(ZSTD(6)),
+              model_version Nullable(String) CODEC(ZSTD(6)),
+              release_name Nullable(String) CODEC(ZSTD(6)),
+              row_json String CODEC(ZSTD(6))
+            )
+            ENGINE = MergeTree
+            ORDER BY (artifact_id, cityHash64(row_json), processed_at)
+            SETTINGS compress_marks = true, compress_primary_key = true
+            "#
+        ))
+        .await?;
+
+        for column_name in raw_plugin_column_names(rows) {
+            self.execute_sql(&format!(
+                "ALTER TABLE {full_name} ADD COLUMN IF NOT EXISTS `{column_name}` Nullable(String) CODEC(ZSTD(6))"
+            ))
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn insert_raw_plugin_rows(
+        &self,
+        source_id: &str,
+        collection_id: &str,
+        artifact: &LocalArtifact,
+        table_name: &str,
+        processed_at: &str,
+        rows: &[Value],
+    ) -> Result<usize> {
+        let full_name = raw_plugin_table_name(source_id, table_name);
+        let prefix = format!("INSERT INTO {full_name} FORMAT JSONEachRow\n");
+        let mut statement = prefix.clone();
+        let mut rows_in_batch = 0usize;
+
+        for row in rows {
+            let encoded = serde_json::to_string(&build_raw_plugin_row(
+                source_id,
+                collection_id,
+                artifact,
+                processed_at,
+                row,
+            )?)?;
+            let would_exceed_rows = rows_in_batch >= MAX_INSERT_ROWS;
+            let would_exceed_bytes =
+                rows_in_batch > 0 && statement.len() + encoded.len() + 1 > MAX_INSERT_BYTES;
+            if would_exceed_rows || would_exceed_bytes {
+                self.execute_sql(&statement).await?;
+                statement.clear();
+                statement.push_str(&prefix);
+                rows_in_batch = 0;
+            }
+            statement.push_str(&encoded);
+            statement.push('\n');
+            rows_in_batch += 1;
+        }
+
+        if rows_in_batch > 0 {
+            self.execute_sql(&statement).await?;
+        }
+
+        Ok(rows.len())
+    }
+
     async fn execute_sql(&self, sql: &str) -> Result<()> {
         let response = self
             .client
@@ -198,6 +310,147 @@ impl ClickHousePublisher {
 
         Ok(())
     }
+}
+
+fn raw_plugin_table_name(source_id: &str, table_name: &str) -> String {
+    format!(
+        "raw.{}__{}",
+        sanitize_identifier(source_id),
+        sanitize_identifier(table_name)
+    )
+}
+
+fn raw_plugin_column_names(rows: &[Value]) -> Vec<String> {
+    let mut names = rows
+        .iter()
+        .filter_map(Value::as_object)
+        .flat_map(|object| object.keys())
+        .map(|name| sanitize_identifier(name))
+        .filter(|name| !is_fixed_raw_plugin_column(name))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn build_raw_plugin_row(
+    source_id: &str,
+    collection_id: &str,
+    artifact: &LocalArtifact,
+    processed_at: &str,
+    row: &Value,
+) -> Result<Map<String, Value>> {
+    let object = row
+        .as_object()
+        .ok_or_else(|| anyhow!("raw plugin row payload must be an object"))?;
+
+    let mut output = Map::new();
+    output.insert(
+        "processed_at".to_string(),
+        Value::String(processed_at.to_string()),
+    );
+    output.insert(
+        "artifact_id".to_string(),
+        Value::String(artifact.metadata.artifact_id.clone()),
+    );
+    output.insert(
+        "source_id".to_string(),
+        Value::String(source_id.to_string()),
+    );
+    output.insert(
+        "collection_id".to_string(),
+        Value::String(collection_id.to_string()),
+    );
+    output.insert(
+        "source_url".to_string(),
+        Value::String(artifact.metadata.acquisition_uri.clone()),
+    );
+    output.insert(
+        "local_path".to_string(),
+        Value::String(artifact.local_path.display().to_string()),
+    );
+    output.insert(
+        "content_sha256".to_string(),
+        Value::String(artifact.metadata.content_sha256.clone().unwrap_or_default()),
+    );
+    output.insert(
+        "model_version".to_string(),
+        artifact
+            .metadata
+            .model_version
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    output.insert(
+        "release_name".to_string(),
+        artifact
+            .metadata
+            .release_name
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    output.insert(
+        "row_json".to_string(),
+        Value::String(serde_json::to_string(row)?),
+    );
+
+    for (name, value) in object {
+        let column_name = sanitize_identifier(name);
+        if is_fixed_raw_plugin_column(&column_name) {
+            continue;
+        }
+        output.insert(column_name, stringify_raw_plugin_value(value)?);
+    }
+
+    Ok(output)
+}
+
+fn stringify_raw_plugin_value(value: &Value) -> Result<Value> {
+    Ok(match value {
+        Value::Null => Value::Null,
+        Value::String(text) => Value::String(text.clone()),
+        Value::Number(number) => Value::String(number.to_string()),
+        Value::Bool(boolean) => Value::String(boolean.to_string()),
+        Value::Array(_) | Value::Object(_) => Value::String(serde_json::to_string(value)?),
+    })
+}
+
+fn is_fixed_raw_plugin_column(column_name: &str) -> bool {
+    matches!(
+        column_name,
+        "processed_at"
+            | "artifact_id"
+            | "source_id"
+            | "collection_id"
+            | "source_url"
+            | "local_path"
+            | "content_sha256"
+            | "model_version"
+            | "release_name"
+            | "row_json"
+    )
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    let mut sanitized = value
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    sanitized = sanitized.trim_matches('_').to_string();
+    if sanitized.is_empty() {
+        return "field".to_string();
+    }
+    if sanitized
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        sanitized.insert_str(0, "f_");
+    }
+    sanitized
 }
 
 fn build_insert_row(

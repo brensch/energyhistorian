@@ -15,8 +15,8 @@ use clap::Parser;
 use ingest_core::{SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin};
 use rusqlite::Connection;
 use serde::Serialize;
-use source_aemo_dvd::AemoDvdPlugin;
-use source_aemo_metadata::AemoMetadataPlugin;
+use source_aemo_dvd::AemoMetadataDvdPlugin;
+use source_aemo_metadata::AemoMetadataHtmlPlugin;
 use source_nemweb::NemwebPlugin;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -191,8 +191,8 @@ async fn main() -> Result<()> {
 fn build_source_plans() -> Vec<SourcePlan> {
     let plugins: Vec<Box<dyn SourcePlugin>> = vec![
         Box::new(NemwebPlugin::new()),
-        Box::new(AemoMetadataPlugin::new()),
-        Box::new(AemoDvdPlugin::new()),
+        Box::new(AemoMetadataHtmlPlugin::new()),
+        Box::new(AemoMetadataDvdPlugin::new()),
     ];
 
     plugins
@@ -469,7 +469,10 @@ fn build_schedule_seeds(
                         &collection.id,
                         collection.default_poll_interval_seconds,
                     ),
-                    scheduler_enabled: source.descriptor.source_id == "aemo.nemweb",
+                    scheduler_enabled: matches!(
+                        source.descriptor.source_id.as_str(),
+                        "aemo.nemweb" | "aemo_metadata_html" | "aemo_metadata_dvd"
+                    ),
                 })
         })
         .collect()

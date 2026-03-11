@@ -1,46 +1,86 @@
+pub mod catalog;
+pub mod discovery;
+pub mod fetch;
+pub mod mms_parser;
+pub mod parse;
+pub mod seed_concepts;
+pub mod seed_reference;
+
+use std::path::Path;
+
 use anyhow::{Result, bail};
-use chrono::Utc;
 use ingest_core::{
-    ArtifactKind, ArtifactMetadata, CollectionCompletion, CompletionUnit, DiscoveredArtifact,
-    DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec,
-    RawTableRowSink, RunContext, SourceCollection, SourceDescriptor, SourceMetadataDocument,
-    SourcePlugin, TaskBlueprint, TaskKind,
+    CollectionCompletion, CompletionUnit, DiscoveredArtifact, DiscoveryRequest, LocalArtifact,
+    ParseResult, PluginCapabilities, PromotionSpec, RawPluginParseResult, RawTableRowSink,
+    RunContext, SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin,
+    TaskBlueprint, TaskKind,
 };
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetadataDocument {
-    pub model_version: Option<&'static str>,
-    pub release_name: &'static str,
-    pub document_type: &'static str,
-    pub url: &'static str,
-    pub notes: &'static str,
-}
+use crate::catalog::AemoCatalog;
 
-pub struct AemoMetadataPlugin;
+#[derive(Clone)]
+pub struct AemoMetadataHtmlPlugin;
 
-impl AemoMetadataPlugin {
+impl AemoMetadataHtmlPlugin {
     pub fn new() -> Self {
         Self
     }
 
-    pub fn catalog(&self) -> &'static [MetadataDocument] {
-        METADATA_DOCUMENTS
+    pub async fn discover_collection(
+        &self,
+        client: &reqwest::Client,
+        collection_id: &str,
+        ctx: &RunContext,
+    ) -> Result<Vec<DiscoveredArtifact>> {
+        discovery::discover_collection(client, collection_id, ctx).await
+    }
+
+    pub async fn fetch_artifact(
+        &self,
+        client: &reqwest::Client,
+        artifact: &DiscoveredArtifact,
+        output_dir: &Path,
+    ) -> Result<LocalArtifact> {
+        fetch::fetch_artifact(client, artifact, output_dir).await
+    }
+
+    pub fn parse_artifact(
+        &self,
+        collection_id: &str,
+        artifact: &LocalArtifact,
+    ) -> Result<RawPluginParseResult> {
+        parse::parse_artifact(collection_id, artifact)
+    }
+
+    pub async fn build_catalog(&self, client: &reqwest::Client) -> Result<AemoCatalog> {
+        let (packages, tables) = mms_parser::fetch_full_model(client).await?;
+
+        Ok(AemoCatalog {
+            packages,
+            tables,
+            concepts: seed_concepts::seed_concepts(),
+            fcas_markets: seed_reference::seed_fcas_markets(),
+            interconnectors: seed_reference::seed_interconnectors(),
+        })
+    }
+
+    pub fn catalog_to_json(catalog: &AemoCatalog) -> Result<String> {
+        Ok(serde_json::to_string_pretty(catalog)?)
     }
 }
 
-impl Default for AemoMetadataPlugin {
+impl Default for AemoMetadataHtmlPlugin {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SourcePlugin for AemoMetadataPlugin {
+impl SourcePlugin for AemoMetadataHtmlPlugin {
     fn descriptor(&self) -> SourceDescriptor {
         SourceDescriptor {
-            source_id: "aemo.metadata".to_string(),
+            source_id: "aemo_metadata_html".to_string(),
             domain: "metadata".to_string(),
-            description: "AEMO versioned Data Model, report-mapping, and release metadata."
+            description: "AEMO HTML metadata supplements for current model and reference pages."
                 .to_string(),
             versioned_metadata: true,
             historical_backfill_supported: true,
@@ -50,12 +90,11 @@ impl SourcePlugin for AemoMetadataPlugin {
     fn capabilities(&self) -> PluginCapabilities {
         PluginCapabilities {
             supports_backfill: true,
-            supports_schema_registry: true,
+            supports_schema_registry: false,
             supports_historical_media: true,
             notes: vec![
-                "Supports versioned Data Model report ingestion across multiple AEMO releases."
-                    .to_string(),
-                "Should normalize table definitions, report mappings, upgrade notes, and population dates."
+                "Discovers metadata documents dynamically from live AEMO index pages.".to_string(),
+                "Extracts raw HTML metadata tables for current explanations and mappings."
                     .to_string(),
             ],
         }
@@ -64,199 +103,83 @@ impl SourcePlugin for AemoMetadataPlugin {
     fn collections(&self) -> Vec<SourceCollection> {
         vec![
             SourceCollection {
-                id: "data-model-reports".to_string(),
-                display_name: "Data Model Reports".to_string(),
-                description: "Versioned Electricity Data Model report documents.".to_string(),
-                retrieval_modes: vec!["fetch-html".to_string(), "fetch-pdf".to_string()],
+                id: "current-data-model".to_string(),
+                display_name: "Current Data Model".to_string(),
+                description: "Current HTML model bundle plus index page references.".to_string(),
+                retrieval_modes: vec!["discover-index".to_string(), "fetch-html".to_string()],
                 completion: CollectionCompletion {
                     unit: CompletionUnit::DocumentVersion,
-                    dedupe_keys: vec!["url".to_string(), "model_version".to_string()],
+                    dedupe_keys: vec!["artifact_id".to_string(), "content_sha256".to_string()],
                     cursor_field: Some("model_version".to_string()),
-                    mutable_window_seconds: None,
+                    mutable_window_seconds: Some(86_400),
                     notes: vec![
-                        "Completion is tracked per metadata document release.".to_string(),
-                        "Older model versions must remain available for historical parsing."
-                            .to_string(),
+                        "Current HTML bundle is keyed by discovered model version.".to_string(),
+                        "HTML is supplemental to DVD DDL for core table comments.".to_string(),
                     ],
                 },
-                task_blueprints: vec![
-                    TaskBlueprint {
-                        kind: TaskKind::Discover,
-                        description: "Enumerate known and newly published metadata documents."
-                            .to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-discover".to_string(),
-                        idempotency_scope: "source+collection+url".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::Fetch,
-                        description: "Download authoritative metadata documents.".to_string(),
-                        max_concurrency: 2,
-                        queue: "metadata-fetch".to_string(),
-                        idempotency_scope: "artifact_id".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::Parse,
-                        description: "Normalize model tables, columns, and release metadata."
-                            .to_string(),
-                        max_concurrency: 2,
-                        queue: "metadata-parse".to_string(),
-                        idempotency_scope: "artifact_id+parser_version".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::SyncMetadata,
-                        description: "Update the control-plane metadata registry.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-sync".to_string(),
-                        idempotency_scope: "model_version+document_type".to_string(),
-                    },
-                ],
+                task_blueprints: metadata_task_blueprints(),
                 default_poll_interval_seconds: Some(86_400),
             },
             SourceCollection {
                 id: "report-relationships".to_string(),
                 display_name: "Table Report Relationships".to_string(),
-                description: "Maps file/report IDs to Data Model tables.".to_string(),
+                description: "Daily snapshot of the AEMO table-to-report relationship page."
+                    .to_string(),
                 retrieval_modes: vec!["fetch-html".to_string(), "fetch-csv-export".to_string()],
                 completion: CollectionCompletion {
                     unit: CompletionUnit::DocumentVersion,
-                    dedupe_keys: vec!["url".to_string()],
+                    dedupe_keys: vec!["artifact_id".to_string(), "content_sha256".to_string()],
                     cursor_field: None,
                     mutable_window_seconds: Some(86_400),
                     notes: vec![
-                        "Relationship documents should be versioned even when the URL is stable."
+                        "Stable URLs are treated as daily snapshots because content can change."
                             .to_string(),
                     ],
                 },
-                task_blueprints: vec![
-                    TaskBlueprint {
-                        kind: TaskKind::Discover,
-                        description: "Check relationship documents for updates.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-discover".to_string(),
-                        idempotency_scope: "source+collection+url".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::Fetch,
-                        description: "Fetch current relationship document variants.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-fetch".to_string(),
-                        idempotency_scope: "artifact_id".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::Parse,
-                        description: "Normalize table-to-report mappings.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-parse".to_string(),
-                        idempotency_scope: "artifact_id+parser_version".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::SyncMetadata,
-                        description: "Refresh collection-to-logical-table mappings.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-sync".to_string(),
-                        idempotency_scope: "collection".to_string(),
-                    },
-                ],
+                task_blueprints: metadata_task_blueprints(),
                 default_poll_interval_seconds: Some(86_400),
             },
             SourceCollection {
                 id: "population-dates".to_string(),
                 display_name: "Population Dates".to_string(),
-                description: "Operational start dates for tables and file IDs.".to_string(),
+                description: "Daily snapshot of the AEMO population dates page.".to_string(),
                 retrieval_modes: vec!["fetch-html".to_string()],
                 completion: CollectionCompletion {
                     unit: CompletionUnit::DocumentVersion,
-                    dedupe_keys: vec!["url".to_string()],
+                    dedupe_keys: vec!["artifact_id".to_string(), "content_sha256".to_string()],
                     cursor_field: None,
                     mutable_window_seconds: Some(86_400),
-                    notes: vec!["Population dates may be revised after publication.".to_string()],
-                },
-                task_blueprints: vec![
-                    TaskBlueprint {
-                        kind: TaskKind::Discover,
-                        description: "Check population date documents for updates.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-discover".to_string(),
-                        idempotency_scope: "source+collection+url".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::Fetch,
-                        description: "Fetch current population date documents.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-fetch".to_string(),
-                        idempotency_scope: "artifact_id".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::Parse,
-                        description: "Normalize table start-date metadata.".to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-parse".to_string(),
-                        idempotency_scope: "artifact_id+parser_version".to_string(),
-                    },
-                    TaskBlueprint {
-                        kind: TaskKind::SyncMetadata,
-                        description: "Refresh table availability hints for backfill planning."
+                    notes: vec![
+                        "Population-date changes are historised as append-only metadata objects."
                             .to_string(),
-                        max_concurrency: 1,
-                        queue: "metadata-sync".to_string(),
-                        idempotency_scope: "collection".to_string(),
-                    },
-                ],
+                    ],
+                },
+                task_blueprints: metadata_task_blueprints(),
                 default_poll_interval_seconds: Some(86_400),
             },
         ]
     }
 
     fn metadata_catalog(&self) -> Vec<SourceMetadataDocument> {
-        self.catalog()
-            .iter()
-            .enumerate()
-            .map(|(idx, doc)| SourceMetadataDocument {
-                id: format!("aemo-metadata-{}", idx),
-                title: doc.release_name.to_string(),
-                version: doc.model_version.map(str::to_string),
-                document_type: doc.document_type.to_string(),
-                url: doc.url.to_string(),
-                notes: doc.notes.to_string(),
-            })
-            .collect()
+        Vec::new()
     }
 
     fn discover(
         &self,
         _request: &DiscoveryRequest,
-        ctx: &RunContext,
+        _ctx: &RunContext,
     ) -> Result<Vec<DiscoveredArtifact>> {
-        Ok(self
-            .catalog()
-            .iter()
-            .enumerate()
-            .map(|(idx, doc)| DiscoveredArtifact {
-                metadata: ArtifactMetadata {
-                    artifact_id: format!("{}-{}-{}", self.descriptor().source_id, ctx.run_id, idx),
-                    source_id: self.descriptor().source_id.clone(),
-                    acquisition_uri: doc.url.to_string(),
-                    discovered_at: Utc::now(),
-                    fetched_at: None,
-                    published_at: None,
-                    content_sha256: None,
-                    content_length_bytes: None,
-                    kind: infer_kind(doc.document_type),
-                    parser_version: ctx.parser_version.clone(),
-                    model_version: doc.model_version.map(str::to_string),
-                    release_name: Some(doc.release_name.to_string()),
-                },
-            })
-            .collect())
+        bail!("Use discover_collection() for async metadata discovery")
     }
 
     fn fetch(&self, _artifact: &DiscoveredArtifact, _ctx: &RunContext) -> Result<LocalArtifact> {
-        bail!("Metadata fetch/parser implementation still needs to be built")
+        bail!("Use fetch_artifact() for async metadata fetching")
     }
 
     fn inspect_parse(&self, _artifact: &LocalArtifact, _ctx: &RunContext) -> Result<ParseResult> {
-        bail!("Metadata normalization is the next major implementation step")
+        bail!(
+            "Metadata parsing is published into plugin-owned raw tables, not schema-hash raw tables"
+        )
     }
 
     fn stream_parse(
@@ -265,7 +188,9 @@ impl SourcePlugin for AemoMetadataPlugin {
         _ctx: &RunContext,
         _sink: &mut dyn RawTableRowSink,
     ) -> Result<()> {
-        bail!("Metadata normalization should stream rows through the shared ingestion contract")
+        bail!(
+            "Metadata parsing is published into plugin-owned raw tables, not schema-hash raw tables"
+        )
     }
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {
@@ -273,77 +198,28 @@ impl SourcePlugin for AemoMetadataPlugin {
     }
 }
 
-fn infer_kind(document_type: &str) -> ArtifactKind {
-    match document_type {
-        "pdf" => ArtifactKind::PdfDocument,
-        "html" => ArtifactKind::HtmlDocument,
-        "csv" => ArtifactKind::CsvExport,
-        _ => ArtifactKind::Unknown,
-    }
+fn metadata_task_blueprints() -> Vec<TaskBlueprint> {
+    vec![
+        TaskBlueprint {
+            kind: TaskKind::Discover,
+            description: "Discover live metadata documents and daily snapshots.".to_string(),
+            max_concurrency: 1,
+            queue: "metadata-discover".to_string(),
+            idempotency_scope: "source+collection+artifact".to_string(),
+        },
+        TaskBlueprint {
+            kind: TaskKind::Fetch,
+            description: "Fetch HTML metadata documents and current model bundle.".to_string(),
+            max_concurrency: 2,
+            queue: "metadata-fetch".to_string(),
+            idempotency_scope: "artifact_id".to_string(),
+        },
+        TaskBlueprint {
+            kind: TaskKind::Parse,
+            description: "Extract historised metadata objects from fetched artifacts.".to_string(),
+            max_concurrency: 2,
+            queue: "metadata-parse".to_string(),
+            idempotency_scope: "artifact_id+parser_version".to_string(),
+        },
+    ]
 }
-
-const METADATA_DOCUMENTS: &[MetadataDocument] = &[
-    MetadataDocument {
-        model_version: Some("5.6"),
-        release_name: "EMMS DM 5.6 November 2025",
-        document_type: "pdf",
-        url: "https://tech-specs.docs.public.aemo.com.au/Content/TSP_EMMSDM56_Nov2025/EMMS_DM5.6_Nov_2025_v3.01_Markup.pdf",
-        notes: "Current detailed Electricity Data Model report.",
-    },
-    MetadataDocument {
-        model_version: Some("5.6"),
-        release_name: "EMMS DM 5.6 November 2025",
-        document_type: "html",
-        url: "https://tech-specs.docs.public.aemo.com.au/Content/TSP_EMMSDM56_Nov2025/EMMS_-_DM5.6_-_Nov_2025_1.htm",
-        notes: "Release landing page and upgrade context for DM 5.6.",
-    },
-    MetadataDocument {
-        model_version: Some("5.5"),
-        release_name: "EMMS DM 5.5 April 2025",
-        document_type: "html",
-        url: "https://tech-specs.docs.public.aemo.com.au/Content/TSP_EMMSDM55_Apr2025/EMMS_DMv5.5_Apr25_1.htm",
-        notes: "Prior version useful for schema and release comparisons.",
-    },
-    MetadataDocument {
-        model_version: Some("5.3"),
-        release_name: "EMMS DM 5.3 April 2024",
-        document_type: "html",
-        url: "https://tech-specs.docs.public.aemo.com.au/Content/TSP_EMMSDM53_April2024/Participant_Impact.htm",
-        notes: "Participant impact page with report migrations and replacements.",
-    },
-    MetadataDocument {
-        model_version: Some("5.2"),
-        release_name: "EMMS DM 5.2 May 2023",
-        document_type: "html",
-        url: "https://tech-specs.docs.public.aemo.com.au/Content/TSP_EMMSDM52May2023/Introduction.htm",
-        notes: "Older release line for historical compatibility.",
-    },
-    MetadataDocument {
-        model_version: None,
-        release_name: "Table to Report Relationships",
-        document_type: "html",
-        url: "https://di-help.docs.public.aemo.com.au/Content/Data_Subscription/TableToFileReport.htm",
-        notes: "Maps file/report IDs to logical Data Model tables.",
-    },
-    MetadataDocument {
-        model_version: None,
-        release_name: "Data Population Dates",
-        document_type: "html",
-        url: "https://tech-specs.docs.public.aemo.com.au/Content/TSP_TechnicalSpecificationPortal/Data_population_dates.htm",
-        notes: "Operational start dates for tables and file IDs.",
-    },
-    MetadataDocument {
-        model_version: None,
-        release_name: "Data Model Reports Index",
-        document_type: "html",
-        url: "https://di-help.docs.public.aemo.com.au/Content/Data_Model/MMS_Data_Model.htm?TocPath=_____8",
-        notes: "Index of Data Model reports and related package summaries.",
-    },
-    MetadataDocument {
-        model_version: Some("legacy"),
-        release_name: "EMMS Technical Specification October to December 2017",
-        document_type: "pdf",
-        url: "https://aemo.com.au/-/media/Files/Electricity/NEM/IT-Systems-and-Change/2017/EMMS-Technical-Specification---October-to-December-2017.pdf",
-        notes: "Legacy technical specification for older historical structures.",
-    },
-];

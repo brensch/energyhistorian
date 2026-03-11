@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod plugin;
 pub mod promotion;
+pub mod raw_plugin;
 pub mod raw_storage;
 pub mod registry;
 pub mod schema;
@@ -16,6 +17,7 @@ pub use plugin::{
     SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 pub use promotion::{CanonicalDataset, PromotionMapping, PromotionMode};
+pub use raw_plugin::{RawPluginParseResult, RawPluginTableBatch};
 pub use raw_storage::{RawTablePlan, physical_raw_table_name, plan_raw_table};
 pub use registry::{PluginCatalog, SourceDescriptor};
 pub use schema::{
