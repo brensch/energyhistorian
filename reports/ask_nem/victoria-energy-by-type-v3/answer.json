@@ -1,0 +1,15 @@
+{
+  "question": "How much energy was used in victoria by type for the last 7 days, broken down by day and type",
+  "status": "answerable",
+  "confidence": "medium",
+  "used_objects": [
+    "semantic.daily_unit_dispatch",
+    "semantic.unit_dimension"
+  ],
+  "data_description": "Daily energy (MWh) per day and fuel type for Victoria (VIC1). Energy is a proxy computed from dispatch TOTALCLEARED summed over settlement intervals and converted to MWh by dividing by 12.",
+  "note": "Analyst note \u2014 Method & caveats: This is a dispatch-based proxy using semantic.daily_unit_dispatch joined to unit_dimension.FUEL_TYPE. Energy = greatest(TOTALCLEARED, 0) / 12 aggregated by calendar day. Fuel/type comes from the unit_dimension table. This provides an approximate view of energy by fuel but is not metered/settlement-grade. Confidence: medium. If you need metered or settlement-quality generation, request actual/metered readings (semantic.actual_gen_duid) or settlement-interval-level data and I will rerun with that source.",
+  "reason": "Answerable using daily_unit_dispatch + unit_dimension per guidance; however this is a dispatch-based proxy (not metered) and fuel/type comes from the unit dimension, so results are approximate for actual metered energy.",
+  "sql": "SELECT\n  toDate(d.SETTLEMENTDATE) AS day,\n  ud.FUEL_TYPE AS fuel_type,\n  sum(greatest(d.TOTALCLEARED, 0) / 12.0) AS energy_mwh\nFROM semantic.daily_unit_dispatch AS d\nJOIN semantic.unit_dimension AS ud USING (DUID)\nWHERE ud.REGIONID = 'VIC1'\n  AND toDate(d.SETTLEMENTDATE) BETWEEN today() - 6 AND today()\nGROUP BY day, fuel_type\nORDER BY day DESC, fuel_type;",
+  "registry_source": "clickhouse",
+  "generated_at": "2026-03-12T09:06:28.535511+00:00"
+}

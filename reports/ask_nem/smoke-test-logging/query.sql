@@ -1,0 +1,7 @@
+SELECT
+  PARTICIPANTID,
+  SUM(REGISTEREDCAPACITY_MW) AS total_registered_mw
+FROM semantic.unit_dimension
+GROUP BY PARTICIPANTID
+ORDER BY total_registered_mw DESC
+LIMIT 50

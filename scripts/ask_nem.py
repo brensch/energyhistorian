@@ -16,12 +16,9 @@ from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 
 import clickhouse_connect
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -37,6 +34,24 @@ DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_OUTPUT_ROOT = Path("reports/ask_nem")
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 OPENAI_TIMEOUT_SECONDS = 60
+REGION_ALIAS_GUIDANCE = (
+    "Canonical NEM region IDs in this warehouse are NSW1, QLD1, VIC1, SA1, TAS1, and SNOWY1. "
+    "Natural-language region names should be normalized before writing SQL: "
+    "New South Wales -> NSW1, Queensland -> QLD1, Victoria -> VIC1, South Australia -> SA1, "
+    "Tasmania -> TAS1, Snowy -> SNOWY1. Do not use VIC, NSW, QLD, SA, or TAS in REGIONID filters."
+)
+QUERY_SURFACE_GUIDANCE = (
+    "For recent generation or energy-by-fuel questions across all technologies, prefer "
+    "semantic.daily_unit_dispatch joined to semantic.unit_dimension and compute a proxy MWh as "
+    "greatest(TOTALCLEARED, 0) / 12. Use semantic.actual_gen_duid only when the user explicitly asks "
+    "for metered actual generation or actual meter readings. If the user says 'energy used' but the "
+    "available semantic surface is generation by fuel, say that clearly in the note."
+)
+
+
+def log(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[ask_nem {timestamp}] {message}", file=sys.stderr, flush=True)
 
 
 FALLBACK_REGISTRY = [
@@ -198,9 +213,21 @@ class Plan:
     reason: str
 
 
+@dataclass
+class ChartSpec:
+    kind: str
+    x: str
+    y: str
+    color: str | None
+    title: str
+    barmode: str | None = None
+
+
 def load_dotenv(path: Path) -> None:
     if not path.exists():
+        log(f".env not found at {path}")
         return
+    log(f"loading environment from {path}")
     for line in path.read_text().splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
@@ -218,6 +245,9 @@ def slugify(value: str) -> str:
 
 
 def connect():
+    log(
+        f"connecting to ClickHouse at {CLICKHOUSE_HOST}:{CLICKHOUSE_PORT} as {CLICKHOUSE_USER}"
+    )
     return clickhouse_connect.get_client(
         host=CLICKHOUSE_HOST,
         port=CLICKHOUSE_PORT,
@@ -227,8 +257,12 @@ def connect():
 
 
 def query_dataframe(client, sql: str) -> pd.DataFrame:
+    preview = " ".join(sql.strip().split())[:160]
+    log(f"running ClickHouse query: {preview}")
     result = client.query(sql)
-    return pd.DataFrame(result.result_rows, columns=result.column_names)
+    df = pd.DataFrame(result.result_rows, columns=result.column_names)
+    log(f"query returned {len(df)} rows and {len(df.columns)} columns")
+    return df
 
 
 def load_registry(client) -> tuple[list[dict[str, Any]], str]:
@@ -238,11 +272,15 @@ def load_registry(client) -> tuple[list[dict[str, Any]], str]:
     ]
     for sql in queries:
         try:
+            log("attempting to load semantic registry from ClickHouse")
             rows = query_dataframe(client, sql)
             if not rows.empty:
+                log(f"loaded semantic registry from ClickHouse with {len(rows)} objects")
                 return rows.to_dict(orient="records"), "clickhouse"
         except Exception:
+            log("semantic registry query failed; trying next registry source")
             pass
+    log(f"falling back to built-in semantic registry with {len(FALLBACK_REGISTRY)} objects")
     return FALLBACK_REGISTRY, "fallback"
 
 
@@ -268,11 +306,13 @@ def call_openai(model: str, system_prompt: str, user_prompt: str) -> str:
         method="POST",
     )
     try:
+        log(f"calling OpenAI Responses API with model {model}")
         with urllib.request.urlopen(request, timeout=OPENAI_TIMEOUT_SECONDS) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI API error: HTTP {exc.code}: {details}") from exc
+    log("received OpenAI response")
 
     if "output_text" in body and body["output_text"]:
         return body["output_text"]
@@ -299,6 +339,7 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 def plan_question(question: str, registry: list[dict[str, Any]], model: str) -> Plan:
+    log(f"planning question against semantic registry: {question}")
     system_prompt = (
         "You are a careful NEM analytics planner. "
         "You must decide whether the user's question can be answered from the provided semantic registry. "
@@ -306,6 +347,8 @@ def plan_question(question: str, registry: list[dict[str, Any]], model: str) -> 
         "If not answerable, return blocked with an empty SQL string. "
         "Prefer concise SQL with explicit grouping and limits. "
         "Use proxies only when the registry caveats imply they are acceptable, and say so in the note. "
+        f"{REGION_ALIAS_GUIDANCE} "
+        f"{QUERY_SURFACE_GUIDANCE} "
         "Return JSON only."
     )
     user_prompt = json.dumps(
@@ -326,6 +369,11 @@ def plan_question(question: str, registry: list[dict[str, Any]], model: str) -> 
         indent=2,
     )
     parsed = extract_json(call_openai(model, system_prompt, user_prompt))
+    log(
+        "planner returned "
+        f"status={parsed.get('status', 'blocked')} "
+        f"objects={len(parsed.get('used_objects', []))}"
+    )
     return Plan(
         status=str(parsed.get("status", "blocked")),
         sql=str(parsed.get("sql", "")).strip(),
@@ -339,6 +387,7 @@ def plan_question(question: str, registry: list[dict[str, Any]], model: str) -> 
 
 
 def refine_answer(question: str, plan: Plan, df: pd.DataFrame, model: str) -> tuple[str, str]:
+    log("refining answer from query results")
     preview = df.head(20).fillna("").astype(str).to_dict(orient="records")
     summary = {
         "row_count": int(len(df)),
@@ -347,7 +396,12 @@ def refine_answer(question: str, plan: Plan, df: pd.DataFrame, model: str) -> tu
     }
     system_prompt = (
         "You are a careful NEM analyst. "
-        "Write a concise explanation of the query result and a short analyst note. "
+        "Write a concise answer to the user's question based on the query result and a short analyst note. "
+        "The answer should directly answer the question, summarize the key result values or pattern, "
+        "and avoid generic meta-commentary about the query. Do not start with phrases like "
+        "'the query shows', 'query returned', or 'the result contains'. State the substantive answer first. "
+        "If the result is a time series broken down by category, call out the dominant categories and the main trend "
+        "over the period instead of dumping raw preview rows. "
         "Respect the provided caveats and do not claim settlement-grade accuracy if the plan says otherwise. "
         "Return JSON only."
     )
@@ -363,16 +417,17 @@ def refine_answer(question: str, plan: Plan, df: pd.DataFrame, model: str) -> tu
             },
             "results_summary": summary,
             "required_output_schema": {
-                "explanation": "string",
+                "answer": "string",
                 "note": "string",
             },
         },
         indent=2,
     )
     parsed = extract_json(call_openai(model, system_prompt, user_prompt))
-    explanation = str(parsed.get("explanation", "")).strip()
+    log("received answer refinement")
+    answer = str(parsed.get("answer", "")).strip()
     note = str(parsed.get("note", "")).strip() or plan.note
-    return explanation, note
+    return answer, note
 
 
 def sanitize_sql(sql: str) -> str:
@@ -380,6 +435,7 @@ def sanitize_sql(sql: str) -> str:
 
 
 def validate_sql(sql: str, allowed_objects: set[str]) -> str:
+    log("validating planned SQL")
     sql = sanitize_sql(sql)
     lowered = sql.lower()
     if not lowered.startswith(("select", "with")):
@@ -396,14 +452,18 @@ def validate_sql(sql: str, allowed_objects: set[str]) -> str:
     unknown = sorted(referenced - allowed_objects)
     if unknown:
         raise ValueError(f"SQL referenced objects not in registry: {', '.join(unknown)}")
+    log(f"SQL validation passed for {len(referenced)} semantic objects")
     return sql
 
 
 def repair_plan(question: str, registry: list[dict[str, Any]], plan: Plan, error: str, model: str) -> Plan:
+    log(f"repairing plan after failure: {error}")
     system_prompt = (
         "You are repairing a failed ClickHouse SQL plan. "
         "Keep the same JSON schema as before. "
         "Only use semantic.* objects from the registry. "
+        f"{REGION_ALIAS_GUIDANCE} "
+        f"{QUERY_SURFACE_GUIDANCE} "
         "If the question cannot be answered cleanly, return blocked."
     )
     user_prompt = json.dumps(
@@ -426,6 +486,11 @@ def repair_plan(question: str, registry: list[dict[str, Any]], plan: Plan, error
         indent=2,
     )
     parsed = extract_json(call_openai(model, system_prompt, user_prompt))
+    log(
+        "repair planner returned "
+        f"status={parsed.get('status', 'blocked')} "
+        f"objects={len(parsed.get('used_objects', []))}"
+    )
     return Plan(
         status=str(parsed.get("status", "blocked")),
         sql=str(parsed.get("sql", "")).strip(),
@@ -438,68 +503,141 @@ def repair_plan(question: str, registry: list[dict[str, Any]], plan: Plan, error
     )
 
 
-def build_chart(df: pd.DataFrame, title: str, out_path: Path, blocked: bool) -> None:
-    plt.style.use("ggplot")
-    fig, ax = plt.subplots(figsize=(10, 5.5))
-    if blocked:
-        ax.text(0.5, 0.5, "Blocked or not yet answerable", ha="center", va="center", fontsize=18)
-        ax.axis("off")
-    elif df.empty:
-        ax.text(0.5, 0.5, "Query returned no rows", ha="center", va="center", fontsize=18)
-        ax.axis("off")
+def plan_chart(question: str, plan: Plan, df: pd.DataFrame, model: str) -> ChartSpec:
+    log("planning chart spec")
+    preview = df.head(20).fillna("").astype(str).to_dict(orient="records")
+    system_prompt = (
+        "You are a data visualization planner. "
+        "Choose a Plotly chart spec for the provided result table. "
+        "Prefer line or stacked bar for time series with categories, bar for ranked categories, and scatter for correlations. "
+        "Return JSON only."
+    )
+    user_prompt = json.dumps(
+        {
+            "question": question,
+            "chart_title_hint": plan.chart_title,
+            "columns": list(df.columns),
+            "dtypes": {column: str(dtype) for column, dtype in df.dtypes.items()},
+            "preview": preview,
+            "required_output_schema": {
+                "kind": "line|bar|area|scatter",
+                "x": "column name",
+                "y": "column name",
+                "color": "column name or null",
+                "title": "string",
+                "barmode": "group|stack|overlay|null",
+            },
+        },
+        indent=2,
+    )
+    try:
+        parsed = extract_json(call_openai(model, system_prompt, user_prompt))
+        spec = ChartSpec(
+            kind=str(parsed.get("kind", "bar")).strip(),
+            x=str(parsed.get("x", "")).strip(),
+            y=str(parsed.get("y", "")).strip(),
+            color=(str(parsed["color"]).strip() if parsed.get("color") else None),
+            title=str(parsed.get("title", "")).strip() or plan.chart_title,
+            barmode=(str(parsed["barmode"]).strip() if parsed.get("barmode") else None),
+        )
+    except Exception as exc:
+        log(f"chart planning failed, falling back to heuristic chart: {exc}")
+        spec = fallback_chart_spec(df, plan.chart_title)
+
+    valid_columns = set(df.columns)
+    if spec.x not in valid_columns or spec.y not in valid_columns or (spec.color and spec.color not in valid_columns):
+        log("chart spec referenced invalid columns; using fallback chart spec")
+        spec = fallback_chart_spec(df, plan.chart_title)
+    return spec
+
+
+def fallback_chart_spec(df: pd.DataFrame, title: str) -> ChartSpec:
+    dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    category_cols = [c for c in df.columns if c not in dt_cols and c not in numeric_cols]
+    if dt_cols and numeric_cols:
+        return ChartSpec(
+            kind="line",
+            x=dt_cols[0],
+            y=numeric_cols[0],
+            color=category_cols[0] if category_cols else None,
+            title=title,
+        )
+    if len(category_cols) >= 1 and len(numeric_cols) >= 1:
+        return ChartSpec(
+            kind="bar",
+            x=category_cols[0],
+            y=numeric_cols[0],
+            color=category_cols[1] if len(category_cols) > 1 else None,
+            title=title,
+            barmode="group",
+        )
+    if len(numeric_cols) >= 2:
+        return ChartSpec(
+            kind="scatter",
+            x=numeric_cols[0],
+            y=numeric_cols[1],
+            color=None,
+            title=title,
+        )
+    return ChartSpec(kind="bar", x=df.columns[0], y=df.columns[-1], color=None, title=title)
+
+
+def build_chart(df: pd.DataFrame, title: str, png_path: Path, html_path: Path, blocked: bool, model: str, question: str, plan: Plan) -> None:
+    if blocked or df.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Blocked or not yet answerable" if blocked else "Query returned no rows",
+            showarrow=False,
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            font={"size": 20},
+        )
+        fig.update_layout(title=title, template="plotly_white")
     else:
-        dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
-        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        category_cols = [c for c in df.columns if c not in dt_cols and c not in numeric_cols]
-        if dt_cols and numeric_cols:
-            x_col = dt_cols[0]
-            y_cols = numeric_cols[: min(3, len(numeric_cols))]
-            for y_col in y_cols:
-                ax.plot(df[x_col], df[y_col], label=y_col)
-            if len(y_cols) > 1:
-                ax.legend()
-            ax.set_xlabel(x_col)
-            ax.set_ylabel(", ".join(y_cols))
-        elif category_cols and numeric_cols:
-            x_col = category_cols[0]
-            y_col = numeric_cols[0]
-            sub = df.head(20)
-            ax.barh(sub[x_col].astype(str), sub[y_col], color="#1f77b4")
-            ax.invert_yaxis()
-            ax.set_xlabel(y_col)
-            ax.set_ylabel(x_col)
-        elif len(numeric_cols) >= 2:
-            ax.scatter(df[numeric_cols[0]], df[numeric_cols[1]], alpha=0.75)
-            ax.set_xlabel(numeric_cols[0])
-            ax.set_ylabel(numeric_cols[1])
+        spec = plan_chart(question, plan, df, model)
+        log(
+            f"rendering Plotly chart kind={spec.kind} x={spec.x} y={spec.y} color={spec.color or 'none'}"
+        )
+        if spec.kind == "line":
+            fig = px.line(df, x=spec.x, y=spec.y, color=spec.color, title=spec.title, markers=True)
+        elif spec.kind == "area":
+            fig = px.area(df, x=spec.x, y=spec.y, color=spec.color, title=spec.title)
+        elif spec.kind == "scatter":
+            fig = px.scatter(df, x=spec.x, y=spec.y, color=spec.color, title=spec.title)
         else:
-            ax.text(0.5, 0.5, "Table preview only", ha="center", va="center", fontsize=18)
-            ax.axis("off")
-    fig.suptitle(title, fontsize=12)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+            fig = px.bar(df, x=spec.x, y=spec.y, color=spec.color, title=spec.title, barmode=spec.barmode or "group")
+        fig.update_layout(template="plotly_white", legend_title_text=spec.color or "")
+
+    fig.write_html(str(html_path), include_plotlyjs="cdn")
+    try:
+        fig.write_image(str(png_path), width=1280, height=720, scale=2)
+    except Exception as exc:
+        log(f"plotly image export failed, chart PNG may be missing: {exc}")
 
 
 def pdf_text(value: str) -> str:
     return xml_escape(value or "")
 
 
-def write_markdown(question: str, plan: Plan, explanation: str, target_dir: Path) -> None:
+def write_markdown(question: str, plan: Plan, answer: str, target_dir: Path) -> None:
     md = (
         f"# {question}\n\n"
         f"- Status: `{plan.status}`\n"
         f"- Confidence: `{plan.confidence}`\n"
         f"- Raw results: `results.csv`\n\n"
+        f"- Interactive chart: `chart.html`\n\n"
+        f"## Answer\n\n{answer}\n\n"
         f"## Data\n\n{plan.data_description}\n\n"
         f"## Note\n\n{plan.note}\n\n"
-        f"## Explanation\n\n{explanation}\n\n"
         f"## SQL\n\n```sql\n{plan.sql}\n```\n"
     )
     (target_dir / "report.md").write_text(md)
 
 
-def write_pdf(question: str, plan: Plan, explanation: str, df: pd.DataFrame, target_dir: Path, chart_path: Path) -> None:
+def write_pdf(question: str, plan: Plan, answer: str, df: pd.DataFrame, target_dir: Path, chart_path: Path) -> None:
     doc = SimpleDocTemplate(str(target_dir / "report.pdf"), pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
     mono = ParagraphStyle("MonoSmall", parent=styles["Code"], fontName="Courier", fontSize=7.5, leading=9)
@@ -509,14 +647,14 @@ def write_pdf(question: str, plan: Plan, explanation: str, df: pd.DataFrame, tar
         Paragraph(f"Status: <b>{pdf_text(plan.status)}</b>", styles["BodyText"]),
         Paragraph(f"Confidence: <b>{pdf_text(plan.confidence)}</b>", styles["BodyText"]),
         Spacer(1, 8),
+        Paragraph("Answer", styles["Heading2"]),
+        Paragraph(pdf_text(answer), styles["BodyText"]),
+        Spacer(1, 8),
         Paragraph("Data", styles["Heading2"]),
         Paragraph(pdf_text(plan.data_description), styles["BodyText"]),
         Spacer(1, 8),
         Paragraph("Note", styles["Heading2"]),
         Paragraph(pdf_text(plan.note), styles["BodyText"]),
-        Spacer(1, 8),
-        Paragraph("Explanation", styles["Heading2"]),
-        Paragraph(pdf_text(explanation), styles["BodyText"]),
         Spacer(1, 12),
     ]
     if chart_path.exists():
@@ -543,12 +681,23 @@ def write_pdf(question: str, plan: Plan, explanation: str, df: pd.DataFrame, tar
     doc.build(elements)
 
 
-def write_bundle(question: str, plan: Plan, explanation: str, df: pd.DataFrame, output_dir: Path, registry_source: str) -> None:
+def write_bundle(question: str, plan: Plan, answer: str, df: pd.DataFrame, output_dir: Path, registry_source: str, model: str) -> None:
+    log(f"writing output bundle to {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     chart_path = output_dir / "chart.png"
-    build_chart(df, plan.chart_title or question, chart_path, blocked=plan.status != "answerable")
-    write_markdown(question, plan, explanation, output_dir)
-    write_pdf(question, plan, explanation, df, output_dir, chart_path)
+    chart_html_path = output_dir / "chart.html"
+    build_chart(
+        df,
+        plan.chart_title or question,
+        chart_path,
+        chart_html_path,
+        blocked=plan.status != "answerable",
+        model=model,
+        question=question,
+        plan=plan,
+    )
+    write_markdown(question, plan, answer, output_dir)
+    write_pdf(question, plan, answer, df, output_dir, chart_path)
     (output_dir / "query.sql").write_text(plan.sql or "-- blocked")
     df.to_csv(output_dir / "results.csv", index=False)
     (output_dir / "answer.json").write_text(
@@ -557,6 +706,7 @@ def write_bundle(question: str, plan: Plan, explanation: str, df: pd.DataFrame, 
                 "question": question,
                 "status": plan.status,
                 "confidence": plan.confidence,
+                "answer": answer,
                 "used_objects": plan.used_objects,
                 "data_description": plan.data_description,
                 "note": plan.note,
@@ -568,6 +718,7 @@ def write_bundle(question: str, plan: Plan, explanation: str, df: pd.DataFrame, 
             indent=2,
         )
     )
+    log("bundle write complete")
 
 
 def run_query(client, question: str, registry: list[dict[str, Any]], model: str) -> tuple[Plan, pd.DataFrame]:
@@ -589,18 +740,24 @@ def run_query(client, question: str, registry: list[dict[str, Any]], model: str)
     last_error = None
     max_attempts = 3
     for attempt in range(max_attempts):
+        log(f"query attempt {attempt + 1} of {max_attempts}")
         try:
             sql = validate_sql(plan.sql, allowed_objects)
+            log("running EXPLAIN SYNTAX for planned SQL")
             client.query(f"EXPLAIN SYNTAX {sql}")
             df = query_dataframe(client, sql)
             if not df.empty:
+                log("query attempt succeeded with non-empty result set")
                 return plan, df
             last_error = "Query returned no rows"
+            log("query attempt returned no rows")
         except Exception as exc:
             last_error = str(exc)
+            log(f"query attempt failed: {last_error}")
         if attempt < max_attempts - 1:
             plan = repair_plan(question, registry, plan, last_error, model)
             if plan.status != "answerable" or not plan.sql:
+                log("repair plan returned blocked or empty SQL; stopping retries")
                 break
 
     if last_error == "Query returned no rows":
@@ -645,17 +802,20 @@ def main() -> int:
 
     client = connect()
     registry, registry_source = load_registry(client)
+    log(f"using semantic registry source: {registry_source}")
     output_dir = args.output or default_output_dir(args.question)
+    log(f"output directory resolved to {output_dir}")
 
     plan, df = run_query(client, args.question, registry, args.model)
     if plan.status == "answerable":
-        explanation, refined_note = refine_answer(args.question, plan, df, args.model)
+        answer, refined_note = refine_answer(args.question, plan, df, args.model)
         if refined_note:
             plan.note = refined_note
     else:
-        explanation = plan.reason or "The question could not be answered from the current semantic layer."
+        log("question could not be answered; producing blocked bundle")
+        answer = plan.reason or "The question could not be answered from the current semantic layer."
 
-    write_bundle(args.question, plan, explanation, df, output_dir, registry_source)
+    write_bundle(args.question, plan, answer, df, output_dir, registry_source, args.model)
     print(
         json.dumps(
             {

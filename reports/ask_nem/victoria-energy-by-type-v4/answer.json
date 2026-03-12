@@ -1,0 +1,16 @@
+{
+  "question": "How much energy was used in Victoria by type for the last 7 days, broken down by day and type",
+  "status": "answerable",
+  "confidence": "medium",
+  "answer": "Query returned daily proxy energy (MWh) by fuel type for Victoria (REGIONID = 'VIC1') for the last 7 days \u2014 63 rows (9 fuel types \u00d7 7 days). Values are proxy MWh = greatest(TOTALCLEARED,0)/12. Example rows from the result preview (day \u2192 {type: energy_mwh, MWh}):\n\n2026-03-12 \u2192 {Battery Storage: 654.543440833333 MWh, Brown coal: 153669.2575458336 MWh, GENERATOR: 0.0 MWh, Hydro: 1976.3333333333333 MWh, LOAD: 0.0 MWh, Natural Gas (Pipeline): 0.0 MWh, Solar: 0.0 MWh, UNKNOWN: 0.0 MWh, Wind: 76179.975565833 MWh}\n\n2026-03-11 \u2192 {Battery Storage: 2649.8250625 MWh, Brown coal: 824080.088136667 MWh, GENERATOR: 0.0 MWh, Hydro: 8110.193333333333 MWh, LOAD: 0.0 MWh, Natural Gas (Pipeline): 0.0 MWh, Solar: 87342.2438625002 MWh, UNKNOWN: 0.0 MWh, Wind: 510466.53023500094 MWh}\n\n2026-03-10 \u2192 {Battery Storage: 34754.43055166669 MWh, Brown coal: 997876.7909708332 MWh}\n\n(The full output contains all 63 day\u00d7type rows in the same format. If you want the complete table as CSV or JSON, I can provide it.)",
+  "used_objects": [
+    "semantic.daily_unit_dispatch",
+    "semantic.unit_dimension"
+  ],
+  "data_description": "Sum of proxy energy (MWh) per day and fuel type for Victoria (VIC1) for the last 7 days (today and previous 6 days). Proxy MWh computed as greatest(TOTALCLEARED, 0) / 12 aggregated by calendar day and FUEL_TYPE from unit_dimension.",
+  "note": "Method & caveats: Results are from semantic.daily_unit_dispatch joined to semantic.unit_dimension; energy is proxied as greatest(TOTALCLEARED,0)/12 aggregated by calendar day and FUEL_TYPE for REGIONID='VIC1'. Confidence: medium. This is a dispatch-based proxy for energy-by-fuel, not settlement-grade or metered actual generation\u2014request semantic.actual_gen_duid for meter readings or settlement-grade values.",
+  "reason": "Registry contains daily_unit_dispatch and unit_dimension; guidance recommends using TOTALCLEARED/12 as a proxy for energy-by-fuel when metered readings are not explicitly requested.",
+  "sql": "SELECT\n  toDate(d.SETTLEMENTDATE) AS day,\n  u.FUEL_TYPE AS type,\n  sum(greatest(d.TOTALCLEARED, 0) / 12.0) AS energy_mwh\nFROM semantic.daily_unit_dispatch AS d\nJOIN semantic.unit_dimension AS u ON d.DUID = u.DUID\nWHERE u.REGIONID = 'VIC1'\n  AND toDate(d.SETTLEMENTDATE) >= today() - 6\nGROUP BY day, type\nORDER BY day DESC, type ASC",
+  "registry_source": "clickhouse",
+  "generated_at": "2026-03-12T09:09:43.740705+00:00"
+}

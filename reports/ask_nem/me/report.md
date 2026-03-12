@@ -1,33 +1,33 @@
-        # How much energy was used in victoria by type for the last 7 days, broken down by day and type
+# How much energy was used in victoria by type for the last 7 days, broken down by day and type
 
-        - Status: `answerable`
-        - Confidence: `medium`
-        - Raw results: `results.csv`
+- Status: `answerable`
+- Confidence: `medium`
+- Raw results: `results.csv`
 
-        ## Data
+## Data
 
-        Daily total metered generation (MWh) by fuel type for the Victoria region for the last 7 calendar days (grouped by day and fuel type).
+Daily energy (MWh) by fuel/source type for Victoria (VIC1) over the last 7 days. Columns: day (date), type (FUEL_TYPE from unit_dimension), energy_mwh (sum of MWH_READING).
 
-        ## Note
+## Note
 
-        Confidence: medium. Do not treat this as settlement-grade data. Common reasons for no-results: (1) data for the requested days has not been ingested yet or there is an ingestion lag/timezone mismatch; (2) REGIONID value differs (e.g., alternative region code or NULL); (3) the join removed rows (unit_dimension entries missing or mismatched keys); or (4) you intended consumer demand rather than generation — in that case use semantic.daily_region_dispatch.TOTALDEMAND. Suggested next steps: confirm the exact date range/timezone, verify REGIONID values in unit_dimension, run the query without the join to check raw actual_gen_duid records, expand the timeframe to 30 days to check data presence, or ask me to prepare an alternative query using TOTALDEMAND if you mean consumption.
+Analyst note — confidence: medium. Caveats: these are metered generation sums, not settlement-grade or direct demand figures. They may omit behind-the-meter or non-metered resources, exclude netting for interconnector flows and storage charging/discharging, and depend on correct unit ↔ fuel mappings. Large wind totals reflect aggregation across many generators and should be validated if surprising. If you need actual consumer demand, dispatch/settlement-quality data, or timezone/DST-verified sums, request the appropriate demand or market operator datasets for verification.
 
-        ## Explanation
+## Explanation
 
-        The query returned no rows. It was intended to sum actual_gen_duid.MWH_READING by day and unit_dimension.FUEL_TYPE for units where unit_dimension.REGIONID = 'VIC' over the last 7 calendar days. An empty result means no generation readings matched those filters in the requested period (no rows to aggregate), so we cannot report daily-by-fuel totals for Victoria for that window.
+The result is a 7‑day daily breakdown (2026-03-06 through 2026-03-12) of summed metered generation in Victoria (VIC1), grouped by generator fuel/source type (FUEL_TYPE). Each row gives day, fuel type, and energy_mwh (the sum of MWH_READING from semantic.actual_gen_duid joined to unit_dimension). The preview contains mainly Wind and Solar entries (Hydro shows zeros). Row_count = 24 (multiple fuel types per day where available). Units = MWh. Note that these values are aggregated in-region metered generation and are presented as a proxy for “energy used” by type, not as direct consumer demand or net system consumption.
 
-        ## SQL
+## SQL
 
-        ```sql
-        SELECT
+```sql
+SELECT
   toDate(a.INTERVAL_DATETIME) AS day,
-  u.FUEL_TYPE AS fuel_type,
+  u.FUEL_TYPE AS type,
   sum(a.MWH_READING) AS energy_mwh
 FROM semantic.actual_gen_duid AS a
-JOIN semantic.unit_dimension AS u
-  ON a.DUID = u.DUID
-WHERE u.REGIONID = 'VIC'
-  AND toDate(a.INTERVAL_DATETIME) >= today() - 6
-GROUP BY day, fuel_type
-ORDER BY day DESC, fuel_type
-        ```
+JOIN semantic.unit_dimension AS u ON a.DUID = u.DUID
+WHERE u.REGIONID = 'VIC1'
+  AND a.INTERVAL_DATETIME >= now() - INTERVAL 7 DAY
+GROUP BY day, type
+ORDER BY day DESC, type
+LIMIT 1000
+```
