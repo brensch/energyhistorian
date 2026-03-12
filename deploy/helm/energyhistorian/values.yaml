@@ -39,14 +39,14 @@ services:
     maxConcurrency: 8
   downloader:
     binary: downloaderd
-    replicaCount: 2
+    replicaCount: 1
     port: 8080
     pollIntervalSecs: 5
     claimBatchSize: 25
     maxConcurrency: 4
   parser:
     binary: parserd
-    replicaCount: 2
+    replicaCount: 3
     port: 8080
     pollIntervalSecs: 5
     claimBatchSize: 10
