@@ -1,0 +1,11 @@
+REGIONID,day_type,avg_demand_mw
+NSW1,Weekday,8115.85
+NSW1,Weekend,7639.48
+QLD1,Weekday,6633.14
+QLD1,Weekend,6834.37
+SA1,Weekday,1044.46
+SA1,Weekend,881.17
+TAS1,Weekday,931.61
+TAS1,Weekend,915.3
+VIC1,Weekday,4825.54
+VIC1,Weekend,4015.51

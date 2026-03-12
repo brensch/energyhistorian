@@ -1,0 +1,60 @@
+REGIONID,FUEL_TYPE,registered_capacity_mw
+NSW1,Black coal,12049.0
+NSW1,GENERATOR,9336.0
+NSW1,Solar,5976.0
+NSW1,Natural Gas (Pipeline),3043.0
+NSW1,Wind,2706.0
+NSW1,Hydro,2629.0
+NSW1,Battery Storage,421.0
+NSW1,Other solid fossil fuels,150.0
+NSW1,Coal seam methane,108.0
+NSW1,Bagasse,68.0
+NSW1,Diesel oil,64.0
+NSW1,Landfill biogas methane,52.0
+NSW1,Kerosene - non aviation,25.0
+NSW1,Coal mine waste gas,19.0
+NSW1,Coal Seam Methane,10.0
+QLD1,Black coal,9015.0
+QLD1,Solar,4886.0
+QLD1,GENERATOR,4047.0
+QLD1,Wind,1960.0
+QLD1,Natural Gas (Pipeline),1529.0
+QLD1,Coal seam methane,1069.0
+QLD1,Hydro,978.0
+QLD1,Battery Storage,598.0
+QLD1,Kerosene - non aviation,419.0
+QLD1,Biomass and industrial materials,157.0
+QLD1,Coal mine waste gas,114.0
+QLD1,Bagasse,75.0
+QLD1,Landfill biogas methane,58.0
+QLD1,Diesel oil,31.0
+QLD1,Primary solid biomass fuels,1.0
+QLD1,UNKNOWN,
+SA1,GENERATOR,3443.0
+SA1,Natural Gas (Pipeline),2999.0
+SA1,Wind,2670.0
+SA1,Brown coal,1030.0
+SA1,Diesel oil,811.0
+SA1,Solar,734.0
+SA1,Battery Storage,522.0
+SA1,Landfill biogas methane,16.0
+SA1,Other Biofuels,10.0
+SA1,Hydro,3.0
+SNOWY1,GENERATOR,18850.0
+TAS1,GENERATOR,4501.0
+TAS1,Hydro,2430.0
+TAS1,Wind,567.0
+TAS1,Natural Gas (Pipeline),231.0
+TAS1,Diesel oil,189.0
+TAS1,Landfill biogas methane,2.0
+VIC1,Brown coal,6730.0
+VIC1,Wind,5764.0
+VIC1,GENERATOR,5666.0
+VIC1,Natural Gas (Pipeline),2638.0
+VIC1,Hydro,2192.0
+VIC1,Solar,1552.0
+VIC1,Battery Storage,651.0
+VIC1,Landfill biogas methane,43.0
+VIC1,Ethane,42.0
+VIC1,Biomass and industrial materials,2.0
+VIC1,UNKNOWN,

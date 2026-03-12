@@ -1,0 +1,1 @@
+SELECT 'blocked' AS status, 'PASA-to-actual comparison needs a reconciled fuel-typed PASA fact mart and clean alignment logic between PASA availability and interval generation.' AS reason

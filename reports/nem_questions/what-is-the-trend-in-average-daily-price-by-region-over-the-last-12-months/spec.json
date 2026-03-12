@@ -1,0 +1,7 @@
+{
+  "question": "What is the trend in average daily price by region over the last 12 months?",
+  "slug": "what-is-the-trend-in-average-daily-price-by-region-over-the-last-12-months",
+  "status": "limited",
+  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes.",
+  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

@@ -12,6 +12,7 @@ use crate::promotion::PromotionMapping;
 use crate::raw_plugin::RawPluginParseResult;
 use crate::registry::SourceDescriptor;
 use crate::schema::ObservedSchema;
+use crate::semantic::SemanticJob;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunContext {
@@ -212,6 +213,9 @@ pub trait SourcePlugin {
         })
     }
     fn promotion_plan(&self) -> &'static [PromotionSpec];
+    fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        Vec::new()
+    }
 
     fn completion_for_collection(&self, collection_id: &str) -> Option<CollectionCompletion> {
         self.collections()

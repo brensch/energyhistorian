@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use ingest_core::{
     DiscoveredArtifact, DiscoveryCursorHint, LocalArtifact, RunContext, RuntimePluginParseResult,
-    RuntimeSourcePlugin, SourceCollection, SourceDescriptor, SourceMetadataDocument,
+    RuntimeSourcePlugin, SemanticJob, SourceCollection, SourceDescriptor, SourceMetadataDocument,
 };
 use serde::Serialize;
 use source_aemo_dvd::AemoMetadataDvdPlugin;
@@ -120,6 +120,11 @@ impl SourceRegistry {
         source
             .implementation
             .stream_structured_parse_runtime(artifact, collection_id, &ctx, sink)
+    }
+
+    pub fn semantic_jobs(&self, source_id: &str) -> Result<Vec<SemanticJob>> {
+        let source = self.source(source_id)?;
+        Ok(source.implementation.semantic_jobs())
     }
 
     fn register<P>(&mut self, plugin: P)

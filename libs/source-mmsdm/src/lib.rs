@@ -7,8 +7,8 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
     DiscoveredArtifact, DiscoveryCursorHint, DiscoveryRequest, LocalArtifact, ParseResult,
     PluginCapabilities, PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult,
-    RuntimeSourcePlugin, SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin,
-    TaskBlueprint, TaskKind,
+    RuntimeSourcePlugin, SemanticJob, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
+    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -56,14 +56,18 @@ impl MmsdmPlugin {
         output_dir: &Path,
     ) -> Result<LocalArtifact> {
         fs::create_dir_all(output_dir)?;
-        let bytes = client
+        let response = client
             .get(&artifact.metadata.acquisition_uri)
             .send()
             .await
+            .with_context(|| format!("downloading {}", artifact.metadata.acquisition_uri))?;
+        let bytes = response
+            .error_for_status()
             .with_context(|| format!("downloading {}", artifact.metadata.acquisition_uri))?
             .bytes()
             .await?
             .to_vec();
+        validate_zip_payload(&artifact.metadata.acquisition_uri, &bytes)?;
         let filename = artifact
             .metadata
             .acquisition_uri
@@ -208,6 +212,140 @@ impl SourcePlugin for MmsdmPlugin {
     fn promotion_plan(&self) -> &'static [PromotionSpec] {
         &[]
     }
+
+    fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        vec![
+            SemanticJob::ConsolidateObservedSchemaViews {
+                target_database: "semantic".to_string(),
+                include_latest_alias: true,
+                naming_strategy: SemanticNamingStrategy::StripYearTokens,
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "mmsdm_table_locator".to_string(),
+                required_objects: vec!["raw_aemo_mmsdm.observed_schemas".to_string()],
+                sql: "SELECT logical_section, logical_table, report_version, physical_table, 'raw_aemo_mmsdm' AS database_name, column_count, schema_hash, first_seen_at, last_seen_at FROM raw_aemo_mmsdm.observed_schemas WHERE physical_table != '' GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash, first_seen_at, last_seen_at".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "mmsdm_schema_registry".to_string(),
+                required_objects: vec!["raw_aemo_mmsdm.observed_schemas".to_string()],
+                sql: "SELECT DISTINCT logical_section, logical_table, report_version, physical_table, column_count, schema_hash, min(first_seen_at) AS first_seen, max(last_seen_at) AS last_seen FROM raw_aemo_mmsdm.observed_schemas GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "table_locator".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_table_locator".to_string(),
+                    "semantic.mmsdm_table_locator".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_table_locator UNION ALL SELECT * FROM semantic.mmsdm_table_locator".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "schema_registry".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_schema_registry".to_string(),
+                    "semantic.mmsdm_schema_registry".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_schema_registry UNION ALL SELECT * FROM semantic.mmsdm_schema_registry".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "unit_dimension".to_string(),
+                required_objects: vec![
+                    "semantic.participant_registration_dudetailsummary".to_string(),
+                    "semantic.participant_registration_dudetail".to_string(),
+                    "semantic.participant_registration_dualloc".to_string(),
+                    "semantic.participant_registration_station".to_string(),
+                    "semantic.participant_registration_stationowner".to_string(),
+                    "semantic.participant_registration_genunits".to_string(),
+                ],
+                sql: concat!(
+                    "WITH toDateTime64('1900-01-01 00:00:00', 3) AS epoch, ",
+                    "current_summary AS (",
+                    "SELECT DUID, ",
+                    "tupleElement(summary_row, 1) AS REGIONID, ",
+                    "tupleElement(summary_row, 2) AS PARTICIPANTID, ",
+                    "tupleElement(summary_row, 3) AS STATIONID, ",
+                    "tupleElement(summary_row, 4) AS DISPATCHTYPE, ",
+                    "tupleElement(summary_row, 5) AS SCHEDULE_TYPE, ",
+                    "tupleElement(summary_row, 6) AS CONNECTIONPOINTID, ",
+                    "tupleElement(summary_row, 7) AS TRANSMISSIONLOSSFACTOR, ",
+                    "tupleElement(summary_row, 8) AS DISTRIBUTIONLOSSFACTOR, ",
+                    "tupleElement(summary_row, 9) AS MAX_RAMP_RATE_UP, ",
+                    "tupleElement(summary_row, 10) AS MAX_RAMP_RATE_DOWN, ",
+                    "tupleElement(summary_row, 11) AS MINIMUM_ENERGY_PRICE, ",
+                    "tupleElement(summary_row, 12) AS MAXIMUM_ENERGY_PRICE, ",
+                    "tupleElement(summary_row, 13) AS START_DATE, ",
+                    "tupleElement(summary_row, 14) AS END_DATE ",
+                    "FROM (",
+                    "SELECT DUID, ",
+                    "argMax(tuple(REGIONID, PARTICIPANTID, STATIONID, DISPATCHTYPE, SCHEDULE_TYPE, CONNECTIONPOINTID, TRANSMISSIONLOSSFACTOR, DISTRIBUTIONLOSSFACTOR, MAX_RAMP_RATE_UP, MAX_RAMP_RATE_DOWN, MINIMUM_ENERGY_PRICE, MAXIMUM_ENERGY_PRICE, START_DATE, END_DATE), tuple(coalesce(START_DATE, epoch), processed_at)) AS summary_row ",
+                    "FROM semantic.participant_registration_dudetailsummary GROUP BY DUID)), ",
+                    "current_detail AS (",
+                    "SELECT DUID, ",
+                    "tupleElement(detail_row, 1) AS MAXSTORAGECAPACITY, ",
+                    "tupleElement(detail_row, 2) AS DETAIL_DISPATCHTYPE ",
+                    "FROM (",
+                    "SELECT DUID, ",
+                    "argMax(tuple(MAXSTORAGECAPACITY, DISPATCHTYPE), tuple(coalesce(EFFECTIVEDATE, epoch), processed_at)) AS detail_row ",
+                    "FROM semantic.participant_registration_dudetail GROUP BY DUID)), ",
+                    "current_alloc AS (",
+                    "SELECT DUID, tupleElement(alloc_row, 1) AS GENSETID ",
+                    "FROM (",
+                    "SELECT DUID, argMax(tuple(GENSETID), tuple(coalesce(EFFECTIVEDATE, epoch), processed_at)) AS alloc_row ",
+                    "FROM semantic.participant_registration_dualloc GROUP BY DUID)), ",
+                    "current_station AS (",
+                    "SELECT STATIONID, ",
+                    "tupleElement(station_row, 1) AS STATIONNAME, ",
+                    "tupleElement(station_row, 2) AS STATE ",
+                    "FROM (",
+                    "SELECT STATIONID, ",
+                    "argMax(tuple(STATIONNAME, STATE), tuple(coalesce(LASTCHANGED, epoch), processed_at)) AS station_row ",
+                    "FROM semantic.participant_registration_station GROUP BY STATIONID)), ",
+                    "current_owner AS (",
+                    "SELECT STATIONID, tupleElement(owner_row, 1) AS STATION_OWNER_PARTICIPANTID ",
+                    "FROM (",
+                    "SELECT STATIONID, ",
+                    "argMax(tuple(PARTICIPANTID), tuple(coalesce(EFFECTIVEDATE, epoch), processed_at)) AS owner_row ",
+                    "FROM semantic.participant_registration_stationowner GROUP BY STATIONID)), ",
+                    "current_gen AS (",
+                    "SELECT GENSETID, ",
+                    "tupleElement(gen_row, 1) AS GENSETTYPE, ",
+                    "tupleElement(gen_row, 2) AS CO2E_ENERGY_SOURCE, ",
+                    "tupleElement(gen_row, 3) AS REGISTEREDCAPACITY, ",
+                    "tupleElement(gen_row, 4) AS MAXCAPACITY, ",
+                    "tupleElement(gen_row, 5) AS CO2E_EMISSIONS_FACTOR ",
+                    "FROM (",
+                    "SELECT GENSETID, ",
+                    "argMax(tuple(GENSETTYPE, CO2E_ENERGY_SOURCE, REGISTEREDCAPACITY, MAXCAPACITY, CO2E_EMISSIONS_FACTOR), tuple(coalesce(LASTCHANGED, epoch), processed_at)) AS gen_row ",
+                    "FROM semantic.participant_registration_genunits GROUP BY GENSETID)) ",
+                    "SELECT summary.DUID AS DUID, summary.REGIONID, summary.PARTICIPANTID, ",
+                    "coalesce(owner.STATION_OWNER_PARTICIPANTID, summary.PARTICIPANTID) AS EFFECTIVE_PARTICIPANTID, ",
+                    "summary.STATIONID AS STATIONID, station.STATIONNAME, station.STATE AS STATIONSTATE, alloc.GENSETID AS GENSETID, ",
+                    "summary.DISPATCHTYPE, detail.DETAIL_DISPATCHTYPE, summary.SCHEDULE_TYPE, summary.CONNECTIONPOINTID, ",
+                    "gen.GENSETTYPE, gen.CO2E_ENERGY_SOURCE AS ENERGY_SOURCE, ",
+                    "coalesce(nullIf(gen.CO2E_ENERGY_SOURCE, ''), nullIf(gen.GENSETTYPE, ''), 'UNKNOWN') AS FUEL_TYPE, ",
+                    "gen.REGISTEREDCAPACITY AS REGISTEREDCAPACITY_MW, gen.MAXCAPACITY AS MAXCAPACITY_MW, ",
+                    "detail.MAXSTORAGECAPACITY AS MAXSTORAGECAPACITY_MWH, gen.CO2E_EMISSIONS_FACTOR, ",
+                    "summary.TRANSMISSIONLOSSFACTOR, summary.DISTRIBUTIONLOSSFACTOR, ",
+                    "summary.MAX_RAMP_RATE_UP, summary.MAX_RAMP_RATE_DOWN, ",
+                    "summary.MINIMUM_ENERGY_PRICE, summary.MAXIMUM_ENERGY_PRICE, ",
+                    "summary.START_DATE, summary.END_DATE, ",
+                    "if(coalesce(detail.MAXSTORAGECAPACITY, 0) > 0 OR summary.DISPATCHTYPE = 'BIDIRECTIONAL', 1, 0) AS IS_STORAGE, ",
+                    "if(summary.DISPATCHTYPE = 'BIDIRECTIONAL', 1, 0) AS IS_BIDIRECTIONAL ",
+                    "FROM current_summary AS summary ",
+                    "LEFT JOIN current_detail AS detail ON summary.DUID = detail.DUID ",
+                    "LEFT JOIN current_alloc AS alloc ON summary.DUID = alloc.DUID ",
+                    "LEFT JOIN current_station AS station ON summary.STATIONID = station.STATIONID ",
+                    "LEFT JOIN current_owner AS owner ON summary.STATIONID = owner.STATIONID ",
+                    "LEFT JOIN current_gen AS gen ON alloc.GENSETID = gen.GENSETID"
+                )
+                .to_string(),
+            },
+        ]
+    }
 }
 
 impl RuntimeSourcePlugin for MmsdmPlugin {
@@ -265,7 +403,7 @@ async fn discover_public_reference_data(
     cursor: &DiscoveryCursorHint,
     ctx: &RunContext,
 ) -> Result<Vec<DiscoveredArtifact>> {
-    let year_re = Regex::new(r#"HREF="(\d{4})/""#)?;
+    let year_re = Regex::new(r#"HREF="[^"]*?(\d{4})/""#)?;
     let month_re = Regex::new(r#"(MMSDM_(\d{4})_(\d{2}))/"#)?;
     let href_re = Regex::new(r#"HREF="([^"]+)""#)?;
     let zip_re = Regex::new(r#"PUBLIC_ARCHIVE#([A-Z0-9_]+)#FILE(\d+)#([0-9]{6,12})\.zip"#)?;
@@ -277,6 +415,11 @@ async fn discover_public_reference_data(
         .collect::<Vec<_>>();
     years.sort();
     years.dedup();
+    tracing::info!(
+        count = years.len(),
+        ?years,
+        "mmsdm: discovered year directories"
+    );
 
     let earliest_month = cursor
         .latest_release_name
@@ -299,6 +442,10 @@ async fn discover_public_reference_data(
         );
     }
     artifacts.sort_by(|left, right| left.metadata.artifact_id.cmp(&right.metadata.artifact_id));
+    tracing::info!(
+        total_artifacts = artifacts.len(),
+        "mmsdm: discovery complete"
+    );
 
     Ok(artifacts)
 }
@@ -332,6 +479,11 @@ async fn discover_year_artifacts(
     months.sort();
     months.dedup();
 
+    tracing::info!(
+        year,
+        month_count = months.len(),
+        "mmsdm: discovered months in year"
+    );
     let mut artifacts = Vec::new();
     for (month_dir, month_key, month_year, month_number) in months {
         if let Some((cursor_year, cursor_month)) = earliest_month {
@@ -433,4 +585,13 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
 fn parse_release_month(release_name: &str) -> Option<(i32, u32)> {
     let (year, month) = release_name.split_once('-')?;
     Some((year.parse().ok()?, month.parse().ok()?))
+}
+
+fn validate_zip_payload(url: &str, bytes: &[u8]) -> Result<()> {
+    const ZIP_PREFIXES: [&[u8]; 3] = [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"];
+    if ZIP_PREFIXES.iter().any(|prefix| bytes.starts_with(prefix)) {
+        return Ok(());
+    }
+    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(160)]);
+    bail!("downloaded non-zip payload from {url}: {preview}");
 }

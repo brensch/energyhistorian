@@ -1,0 +1,7 @@
+{
+  "question": "What was the total FCAS cost by region and market over the last 7 days?",
+  "slug": "what-was-the-total-fcas-cost-by-region-and-market-over-the-last-7-days",
+  "status": "proxy",
+  "data_description": "This report is derived from the following semantic surfaces in ClickHouse: `semantic.daily_region_dispatch`, reconciled to one row per settlement interval and region, providing regional demand, dispatch, interchange, available generation, excess generation, and regional FCAS enablement fields. `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes.",
+  "note": "This estimates FCAS cost as enabled MW times FCAS price for each interval. It is a market-operations proxy, not a settlement-grade FCAS cost calculation. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

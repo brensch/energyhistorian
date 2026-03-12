@@ -1,0 +1,21 @@
+DUID,REGIONID,FUEL_TYPE,peak_dispatch_target_mw
+TUMUT3,NSW1,Hydro,1200.0
+KPP_1,QLD1,Black coal,720.0
+BW04,NSW1,Black coal,685.0
+BW02,NSW1,Black coal,685.0
+BW03,NSW1,Black coal,685.0
+ER03,NSW1,Black coal,660.0
+BW01,NSW1,Black coal,660.0
+ER04,NSW1,Black coal,660.0
+ER01,NSW1,Black coal,621.77004
+UPPTUMUT,NSW1,Hydro,581.51375
+LOYYB2,VIC1,Brown coal,574.0
+VP6,NSW1,Black coal,550.0
+VP5,NSW1,Black coal,550.0
+LYA2,VIC1,Brown coal,530.0
+ER02,NSW1,Black coal,530.0
+LYA4,VIC1,Brown coal,505.0
+LYA3,VIC1,Brown coal,505.0
+STOCKYD1,VIC1,Wind,499.27262
+MP1,NSW1,Black coal,489.54565
+MP2,NSW1,Black coal,485.39520000000005

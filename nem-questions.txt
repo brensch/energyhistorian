@@ -1,0 +1,124 @@
+What was the average spot price in each NEM region over the last 7 days?
+Which region had the highest average spot price this week?
+How volatile were 5-minute prices in each region over the past week?
+What was the maximum spot price spike in each region in the last 30 days and when did it happen?
+How many intervals had negative spot prices in each region this month?
+What was the daily regional demand (MWh) over the last 7 days?
+Which region had the biggest demand forecast error each day in the last 30 days?
+What was the peak demand in each region this week and when did it occur?
+How does weekday demand compare to weekend demand by region?
+What is the average demand shape by hour of day for each region?
+Which DUIDs produced the most energy (MWh) yesterday?
+Which DUIDs had the highest peak dispatch target in the last 24 hours?
+What was the SCADA output profile of the top 10 generators over the last day?
+Which generators were dispatched above 90% of their registered capacity?
+Which generators had the largest ramp rates in the last 24 hours?
+How much energy did each fuel type produce by region over the last 7 days?
+What share of generation came from renewables vs fossil fuels by region?
+What was the solar generation curve yesterday by region?
+What was the wind generation curve yesterday by region?
+How much coal generation has dropped month-over-month by region?
+How much energy did batteries send out (discharge) in each region over the last 7 days?
+How much energy did batteries consume (charge) in each region over the last 7 days?
+What was the average battery round-trip efficiency for each BESS DUID in the last 7 days?
+Which batteries had the highest utilisation rate?
+What was the peak charge and discharge rate for each battery DUID yesterday?
+How wide was the NSW-VIC price spread each day over the last week?
+Which interconnectors had the highest average flow in the last 7 days?
+What was the average price spread across each interconnector pair?
+When were interconnectors at their flow limit in the last 7 days?
+How correlated are prices between adjacent regions?
+What was the total FCAS cost by region and market over the last 7 days?
+Which FCAS market had the highest average price this week?
+How much FCAS enablement did each region provide in the last 7 days?
+Which DUIDs provided the most FCAS across all markets in the last day?
+What is the ratio of FCAS price to energy price by region over time?
+Which participants own the most registered generation capacity?
+How many DUIDs does each participant have and in which regions?
+What is the total registered capacity by fuel type in each region?
+Which stations have the largest installed capacity?
+How many batteries are registered in each region and what is their total capacity?
+What was the estimated gross merchant revenue for the top 20 generators this week?
+Which generators earned the most from high-price intervals?
+What was the approximate revenue per MWh for each fuel type?
+Which batteries had the highest estimated arbitrage revenue this week?
+How does generator revenue correlate with capacity factor?
+What were the top 10 negative-price DUIDs (generators still running during negative prices)?
+How many dispatch intervals showed price separation between regions in the last 7 days?
+Which constraints were most frequently binding in the last 30 days?
+What was the average constraint shadow price by constraint type?
+How did the dispatch engine's solution quality change over the last 30 days?
+What is the current installed solar capacity vs 12 months ago by region?
+How has the wind generation share changed quarter-over-quarter?
+What is the monthly trend in battery registrations and capacity?
+How has the demand profile shape changed year-over-year?
+What is the trend in average daily price by region over the last 12 months?
+How does actual generation compare to PASA forecast by fuel type?
+What was the demand forecast error distribution for each region?
+How accurate was the 5-minute pre-dispatch price forecast?
+What was the 30-minute pre-dispatch forecast vs actual for each region?
+How far ahead does the pre-dispatch forecast diverge significantly from actual?
+What were the top 10 price events (highest 5-minute prices) in the last 30 days?
+What was the generation mix during each major price event?
+Which generators responded to price spikes and how quickly?
+Was there a correlation between demand forecast errors and price spikes?
+Which region had the most frequent price cap events?
+How did generators change their bids day-over-day?
+What is the typical bid structure for each fuel type?
+How do battery bid prices compare to gas peaker bid prices?
+Which generators rebid most frequently and why (volume changes)?
+What was the average bid-weighted price by fuel type?
+What is the approximate carbon intensity of generation by region over the last 7 days?
+Which region has the lowest emissions intensity?
+How does emissions intensity change by hour of day?
+What was the trend in emissions intensity month-over-month?
+How much CO2 was avoided by renewable generation vs the marginal generator?
+What is the minimum demand seen in each region and when does it typically occur?
+How much rooftop PV is estimated in each region?
+What is the operational demand (grid demand minus rooftop PV) trend?
+When does each region typically reach net zero or negative operational demand?
+What is the overnight baseload demand by region?
+What was the total interconnector loss by flow direction this week?
+How do interconnector flows correlate with price differentials?
+What is the marginal loss factor distribution across all DUIDs?
+How did actual interconnector flows compare to limits during peak demand?
+What is the net export position of each region by hour?
+How long did each generator run continuously in the last 7 days?
+What was the capacity factor for each generator in the last 30 days?
+Which generators had forced outages or sudden drops in output?
+How does actual output compare to registered capacity for intermittent generators?
+What is the average time to ramp from zero to max for gas peakers?
+What is the total market value of energy traded in each region per day?
+What was the weighted average price paid by load in each region?
+How does the wholesale cost of electricity break down by component (energy, FCAS, losses)?
+What is the average daily settlement amount by region?
+How volatile is the daily market value compared to historical averages?
+What is the daily demand-weighted price by region?
+How does the time-weighted average price compare to the demand-weighted average price?
+What is the implied value of storage for 2-hour and 4-hour batteries at current spreads?
+What was the cost of unserved energy by region?
+Which region had the most volatile intraday price swings?
+How many unique DUIDs were dispatched in each region yesterday?
+What is the average number of generators online by hour of day?
+Which semi-scheduled generators had the most curtailment?
+What is the correlation between gas prices and NEM electricity prices?
+How does the NEM compare across regions in terms of price, demand, and generation mix?
+What is the all-time minimum demand record for each region?
+What is the all-time maximum price record for each region and when did it occur?
+How has the number of registered DUIDs changed over the last 5 years?
+What is the seasonal demand pattern for each region?
+How does summer peak demand compare to winter peak demand?
+What is the daytime (9am-5pm) vs nighttime (5pm-9am) average price by region?
+How does the price volatility on weekdays compare to weekends?
+What is the correlation between temperature and demand by region?
+Which hours have the highest average prices by region?
+What is the rolling 7-day average price trend for each region?
+How many hours per week does each region spend above $100/MWh?
+What is the average ramp rate required from dispatchable generators by hour?
+How much frequency regulation FCAS is typically enabled by region?
+What is the distribution of 5-minute price outcomes (histogram) by region?
+What share of demand is met by local generation vs imports in each region?
+How does the SA generation mix differ from NSW?
+Which region is most dependent on interconnector imports?
+How many MW of gas generation capacity is registered but rarely dispatched?
+What is the current headroom (spare capacity) in each region at peak?

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "apps/reconcile-semantics",
   "apps/downloaderd",
   "apps/parserd",
   "apps/schedulerd",

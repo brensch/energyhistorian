@@ -1,0 +1,7 @@
+{
+  "question": "Which participants own the most registered generation capacity?",
+  "slug": "which-participants-own-the-most-registered-generation-capacity",
+  "status": "ready",
+  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.unit_dimension`, the current reconciled DUID dimension derived from MMSDM registration history, providing region, participant, station, fuel, registered capacity, storage flags, dispatch type, and emissions factor.",
+  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

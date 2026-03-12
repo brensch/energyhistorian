@@ -1,0 +1,14 @@
+FUEL_TYPE,avg_bid_weighted_price
+Kerosene - non aviation,18515.63
+Diesel oil,17810.72
+Natural Gas (Pipeline),16764.55
+GENERATOR,15000.0
+Coal seam methane,10687.19
+UNKNOWN,7827.93
+Hydro,5555.9
+Black coal,4034.67
+Battery Storage,3173.58
+Solar,358.0
+Wind,-194.19
+Brown coal,-464.22
+LOAD,-509.09

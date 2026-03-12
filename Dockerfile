@@ -6,6 +6,7 @@ COPY apps ./apps
 COPY libs ./libs
 
 RUN cargo build --release --locked \
+    --package reconcile-semantics \
     --package downloaderd \
     --package parserd \
     --package schedulerd
@@ -20,6 +21,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/downloaderd /usr/local/bin/downloaderd
 COPY --from=builder /app/target/release/parserd /usr/local/bin/parserd
+COPY --from=builder /app/target/release/reconcile-semantics /usr/local/bin/reconcile-semantics
 COPY --from=builder /app/target/release/schedulerd /usr/local/bin/schedulerd
 
 RUN mkdir -p /data

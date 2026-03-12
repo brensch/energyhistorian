@@ -1,0 +1,1 @@
+SELECT 'blocked' AS status, 'Operational demand requires rooftop PV or an operational demand dataset.' AS reason

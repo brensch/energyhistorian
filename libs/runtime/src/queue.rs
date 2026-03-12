@@ -187,15 +187,30 @@ pub async fn claim_tasks(
     let transaction = client.transaction().await?;
     let rows = transaction
         .query(
-            "WITH claimed AS ( \
-               SELECT task_id \
+            "WITH ranked AS ( \
+               SELECT task_id, source_id, priority, available_at, created_at, \
+                      ROW_NUMBER() OVER ( \
+                          PARTITION BY source_id \
+                          ORDER BY priority ASC, available_at ASC, created_at ASC \
+                      ) AS source_rank \
                FROM task_queue \
                WHERE task_kind = $1 \
                  AND task_state = 'queued' \
                  AND available_at <= NOW() \
                  AND (lease_expires_at IS NULL OR lease_expires_at < NOW()) \
-               ORDER BY priority ASC, available_at ASC, created_at ASC \
-               FOR UPDATE SKIP LOCKED \
+             ), \
+             candidate AS ( \
+               SELECT task_id, priority, source_rank, available_at, created_at \
+               FROM ranked \
+               ORDER BY priority ASC, source_rank ASC, available_at ASC, created_at ASC \
+               LIMIT $2 \
+             ), \
+             claimed AS ( \
+               SELECT t.task_id \
+               FROM task_queue t \
+               JOIN candidate c ON c.task_id = t.task_id \
+               ORDER BY c.priority ASC, c.source_rank ASC, c.available_at ASC, c.created_at ASC \
+               FOR UPDATE OF t SKIP LOCKED \
                LIMIT $2 \
              ) \
              UPDATE task_queue t \

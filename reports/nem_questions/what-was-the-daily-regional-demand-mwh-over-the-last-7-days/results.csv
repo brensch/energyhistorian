@@ -1,0 +1,2 @@
+error
+"Received ClickHouse exception, code: 60, server response: Code: 60. DB::Exception: Unknown table expression identifier 'semantic.dregion_vf_3' in scope SELECT * FROM semantic.dregion_vf_3. (UNKNOWN_TABLE) (version 25.2.2.39 (official build)) (for url http://127.0.0.1:8123)"

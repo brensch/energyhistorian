@@ -1,0 +1,50 @@
+WITH
+
+unit_dispatch AS (
+    SELECT
+        SETTLEMENTDATE,
+        DUID,
+        avg(TOTALCLEARED) AS TOTALCLEARED,
+        avg(INITIALMW) AS INITIALMW,
+        avg(AVAILABILITY) AS AVAILABILITY,
+        avg(RAMPUPRATE) AS RAMPUPRATE,
+        avg(RAMPDOWNRATE) AS RAMPDOWNRATE,
+        avg(RAISE6SEC + RAISE60SEC + RAISE5MIN + RAISEREG) AS FCAS_RAISE_TOTAL,
+        avg(LOWER6SEC + LOWER60SEC + LOWER5MIN + LOWERREG) AS FCAS_LOWER_TOTAL
+    FROM semantic.daily_unit_dispatch
+    GROUP BY SETTLEMENTDATE, DUID
+)
+,
+
+unit_dim AS (
+    SELECT
+        DUID,
+        REGIONID,
+        EFFECTIVE_PARTICIPANTID,
+        PARTICIPANTID,
+        STATIONID,
+        STATIONNAME,
+        FUEL_TYPE,
+        ENERGY_SOURCE,
+        REGISTEREDCAPACITY_MW,
+        MAXCAPACITY_MW,
+        MAXSTORAGECAPACITY_MWH,
+        CO2E_EMISSIONS_FACTOR,
+        IS_STORAGE,
+        IS_BIDIRECTIONAL,
+        DISPATCHTYPE,
+        SCHEDULE_TYPE
+    FROM semantic.unit_dimension
+)
+
+SELECT
+    d.DUID,
+    any(u.REGIONID) AS REGIONID,
+    any(u.FUEL_TYPE) AS FUEL_TYPE,
+    max(d.TOTALCLEARED) AS peak_dispatch_target_mw
+FROM unit_dispatch d
+LEFT JOIN unit_dim u ON u.DUID = d.DUID
+WHERE d.SETTLEMENTDATE >= now() - INTERVAL 24 HOUR
+GROUP BY d.DUID
+ORDER BY peak_dispatch_target_mw DESC
+LIMIT 20

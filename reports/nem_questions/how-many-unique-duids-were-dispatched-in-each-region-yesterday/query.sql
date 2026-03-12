@@ -1,0 +1,48 @@
+WITH
+
+unit_dispatch AS (
+    SELECT
+        SETTLEMENTDATE,
+        DUID,
+        avg(TOTALCLEARED) AS TOTALCLEARED,
+        avg(INITIALMW) AS INITIALMW,
+        avg(AVAILABILITY) AS AVAILABILITY,
+        avg(RAMPUPRATE) AS RAMPUPRATE,
+        avg(RAMPDOWNRATE) AS RAMPDOWNRATE,
+        avg(RAISE6SEC + RAISE60SEC + RAISE5MIN + RAISEREG) AS FCAS_RAISE_TOTAL,
+        avg(LOWER6SEC + LOWER60SEC + LOWER5MIN + LOWERREG) AS FCAS_LOWER_TOTAL
+    FROM semantic.daily_unit_dispatch
+    GROUP BY SETTLEMENTDATE, DUID
+)
+,
+
+unit_dim AS (
+    SELECT
+        DUID,
+        REGIONID,
+        EFFECTIVE_PARTICIPANTID,
+        PARTICIPANTID,
+        STATIONID,
+        STATIONNAME,
+        FUEL_TYPE,
+        ENERGY_SOURCE,
+        REGISTEREDCAPACITY_MW,
+        MAXCAPACITY_MW,
+        MAXSTORAGECAPACITY_MWH,
+        CO2E_EMISSIONS_FACTOR,
+        IS_STORAGE,
+        IS_BIDIRECTIONAL,
+        DISPATCHTYPE,
+        SCHEDULE_TYPE
+    FROM semantic.unit_dimension
+)
+
+SELECT
+    coalesce(u.REGIONID, 'UNKNOWN') AS REGIONID,
+    countDistinct(d.DUID) AS dispatched_duids
+FROM unit_dispatch d
+LEFT JOIN unit_dim u ON u.DUID = d.DUID
+WHERE toDate(d.SETTLEMENTDATE) = yesterday()
+  AND abs(d.TOTALCLEARED) > 0.01
+GROUP BY REGIONID
+ORDER BY dispatched_duids DESC

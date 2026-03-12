@@ -2321,6 +2321,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reconcile-semantics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "runtime",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2912,6 +2924,7 @@ dependencies = [
  "reqwest",
  "sha2",
  "source-nemweb",
+ "tracing",
 ]
 
 [[package]]

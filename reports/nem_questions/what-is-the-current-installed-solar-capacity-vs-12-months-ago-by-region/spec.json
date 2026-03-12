@@ -1,0 +1,7 @@
+{
+  "question": "What is the current installed solar capacity vs 12 months ago by region?",
+  "slug": "what-is-the-current-installed-solar-capacity-vs-12-months-ago-by-region",
+  "status": "limited",
+  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.unit_dimension`, the current reconciled DUID dimension derived from MMSDM registration history, providing region, participant, station, fuel, registered capacity, storage flags, dispatch type, and emissions factor.",
+  "note": "The semantic layer currently exposes current unit state cleanly; the 12-month comparison is omitted until a historical registration snapshot mart is built. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

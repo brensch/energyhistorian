@@ -20,6 +20,7 @@ use crate::queue::{
     requeue_expired_leases, sync_collection_schedules, try_acquire_scheduler_leadership,
     wait_for_trigger,
 };
+use crate::semantic::reconcile_source_semantics;
 use crate::source_registry::{ParsedArtifact, SourceRegistry};
 
 const LEASE_DURATION: Duration = Duration::from_secs(300);
@@ -447,13 +448,15 @@ async fn execute_parse_task(
                 &result,
             )
             .await?;
+            let semantic_jobs =
+                reconcile_source_semantics(publisher, registry, &task.source_id).await?;
             record_parse_success(
                 client,
                 task,
                 "parserd",
                 parser_version,
                 published as i64,
-                json!({ "clickhouse_rows": published }),
+                json!({ "clickhouse_rows": published, "semantic_jobs": semantic_jobs }),
             )
             .await?;
             info!(
@@ -461,6 +464,7 @@ async fn execute_parse_task(
                 artifact_id = artifact_id,
                 collection_id = %task.collection_id,
                 clickhouse_rows = published,
+                semantic_jobs = semantic_jobs,
                 observed_schema_count = result.observed_schemas.len(),
                 "completed parse task"
             );
@@ -474,13 +478,15 @@ async fn execute_parse_task(
                     &result,
                 )
                 .await?;
+            let semantic_jobs =
+                reconcile_source_semantics(publisher, registry, &task.source_id).await?;
             record_parse_success(
                 client,
                 task,
                 "parserd",
                 parser_version,
                 published as i64,
-                json!({ "clickhouse_rows": published }),
+                json!({ "clickhouse_rows": published, "semantic_jobs": semantic_jobs }),
             )
             .await?;
             info!(
@@ -488,6 +494,7 @@ async fn execute_parse_task(
                 artifact_id = artifact_id,
                 collection_id = %task.collection_id,
                 clickhouse_rows = published,
+                semantic_jobs = semantic_jobs,
                 raw_table_count = result.tables.len(),
                 "completed parse task"
             );

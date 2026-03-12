@@ -1,0 +1,14 @@
+FUEL_TYPE,avg_priceband1,avg_priceband5,avg_priceband10
+Battery Storage,-958.74,99.09,16016.15
+Black coal,-958.47,93.79,19455.67
+Brown coal,-973.61,45.8,19764.28
+Coal seam methane,-966.7,214.65,19624.01
+Diesel oil,-1004.43,332.03,20389.84
+GENERATOR,-1000.0,4.0,15000.0
+Hydro,-919.03,102.63,18255.41
+Kerosene - non aviation,-912.1,482.51,18515.63
+LOAD,-671.02,28.98,10667.02
+Natural Gas (Pipeline),-975.86,275.7,19680.61
+Solar,-932.14,107.38,18906.87
+UNKNOWN,-904.8,147.99,14433.53
+Wind,-949.35,1.91,19251.65

@@ -1,0 +1,10 @@
+INTERCONNECTORID,flow_direction,total_losses_mwh
+N-Q-MNSP1,Negative flow,4.83
+N-Q-MNSP1,Positive flow,1.21
+NSW1-QLD1,Negative flow,-3.7
+NSW1-QLD1,Positive flow,7.25
+T-V-MNSP1,Negative flow,2.84
+T-V-MNSP1,Positive flow,0.0
+V-S-MNSP1,Positive flow,68.29
+V-SA,Positive flow,10.34
+VIC1-NSW1,Negative flow,-52.01

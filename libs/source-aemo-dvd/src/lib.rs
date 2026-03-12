@@ -9,7 +9,7 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
     DiscoveredArtifact, DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities,
     PromotionSpec, RawPluginParseResult, RawPluginTableBatch, RawTableRowSink, RunContext,
-    RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection, SourceDescriptor,
+    RuntimePluginParseResult, RuntimeSourcePlugin, SemanticJob, SourceCollection, SourceDescriptor,
     SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 use regex::Regex;
@@ -47,14 +47,18 @@ impl AemoMetadataDvdPlugin {
         output_dir: &Path,
     ) -> Result<LocalArtifact> {
         fs::create_dir_all(output_dir)?;
-        let bytes = client
+        let response = client
             .get(&artifact.metadata.acquisition_uri)
             .send()
             .await
+            .with_context(|| format!("downloading {}", artifact.metadata.acquisition_uri))?;
+        let bytes = response
+            .error_for_status()
             .with_context(|| format!("downloading {}", artifact.metadata.acquisition_uri))?
             .bytes()
             .await?
             .to_vec();
+        validate_zip_payload(&artifact.metadata.acquisition_uri, &bytes)?;
         let filename = artifact
             .metadata
             .acquisition_uri
@@ -185,6 +189,23 @@ impl SourcePlugin for AemoMetadataDvdPlugin {
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {
         &[]
+    }
+
+    fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        vec![
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "mms_tables".to_string(),
+                required_objects: vec!["raw_aemo_metadata_dvd.tables".to_string()],
+                sql: "SELECT table_name, description, model_version, release_name, row_json FROM raw_aemo_metadata_dvd.tables WHERE table_name IS NOT NULL".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "mms_columns".to_string(),
+                required_objects: vec!["raw_aemo_metadata_dvd.columns".to_string()],
+                sql: "SELECT * FROM raw_aemo_metadata_dvd.columns".to_string(),
+            },
+        ]
     }
 }
 
@@ -445,9 +466,20 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
         .send()
         .await
         .with_context(|| format!("downloading {url}"))?
+        .error_for_status()
+        .with_context(|| format!("unexpected status downloading {url}"))?
         .text()
         .await
         .with_context(|| format!("reading {url}"))
+}
+
+fn validate_zip_payload(url: &str, bytes: &[u8]) -> Result<()> {
+    const ZIP_PREFIXES: [&[u8]; 3] = [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"];
+    if ZIP_PREFIXES.iter().any(|prefix| bytes.starts_with(prefix)) {
+        return Ok(());
+    }
+    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(160)]);
+    bail!("downloaded non-zip payload from {url}: {preview}");
 }
 
 fn zip_entry_string(zip: &mut ZipArchive<Cursor<Vec<u8>>>, suffix: &str) -> Result<Option<String>> {

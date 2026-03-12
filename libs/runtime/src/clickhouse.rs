@@ -4,6 +4,7 @@ use ingest_core::{
     LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, plan_raw_table_in_database,
 };
 use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -382,7 +383,37 @@ impl ClickHousePublisher {
         Ok(rows.len())
     }
 
-    async fn execute_sql(&self, sql: &str) -> Result<()> {
+    pub async fn query_json_rows<T>(&self, sql: &str) -> Result<Vec<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let statement = format!("{sql}\nFORMAT JSONEachRow");
+        let response = self
+            .client
+            .post(&self.config.url)
+            .basic_auth(&self.config.user, Some(&self.config.password))
+            .body(statement.clone())
+            .send()
+            .await
+            .with_context(|| format!("sending clickhouse query: {}", summarize_sql(&statement)))?;
+        if response.status() != StatusCode::OK {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "clickhouse returned {} for `{}`: {}",
+                status,
+                summarize_sql(&statement),
+                body
+            );
+        }
+        let body = response.text().await?;
+        body.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).context("decoding clickhouse JSONEachRow"))
+            .collect()
+    }
+
+    pub(crate) async fn execute_sql(&self, sql: &str) -> Result<()> {
         let response = self
             .client
             .post(&self.config.url)
@@ -413,7 +444,7 @@ fn raw_plugin_table_name(source_id: &str, table_name: &str) -> String {
     )
 }
 
-fn raw_database_name(source_id: &str) -> String {
+pub(crate) fn raw_database_name(source_id: &str) -> String {
     format!("raw_{}", sanitize_identifier(source_id))
 }
 
@@ -645,7 +676,7 @@ fn is_fixed_raw_plugin_column(column_name: &str) -> bool {
     )
 }
 
-fn sanitize_identifier(value: &str) -> String {
+pub(crate) fn sanitize_identifier(value: &str) -> String {
     let mut sanitized = value
         .to_ascii_lowercase()
         .chars()

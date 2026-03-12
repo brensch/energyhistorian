@@ -1,0 +1,7 @@
+{
+  "question": "What is the average time to ramp from zero to max for gas peakers?",
+  "slug": "what-is-the-average-time-to-ramp-from-zero-to-max-for-gas-peakers",
+  "status": "blocked",
+  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
+  "note": "The report harness does not yet compute zero-to-max ramp episodes. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

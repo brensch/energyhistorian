@@ -12,8 +12,9 @@ use anyhow::{Result, bail};
 use ingest_core::{
     BoxedFuture, CollectionCompletion, CompletionUnit, DiscoveredArtifact, DiscoveryRequest,
     LocalArtifact, ParseResult, PluginCapabilities, PromotionSpec, RawPluginParseResult,
-    RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection,
-    SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin, SemanticJob,
+    SourceCollection, SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint,
+    TaskKind,
 };
 
 use crate::catalog::AemoCatalog;
@@ -195,6 +196,53 @@ impl SourcePlugin for AemoMetadataHtmlPlugin {
 
     fn promotion_plan(&self) -> &'static [PromotionSpec] {
         &[]
+    }
+
+    fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        vec![
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "column_descriptions".to_string(),
+                required_objects: vec!["raw_aemo_metadata_html.column_explanations".to_string()],
+                sql: "SELECT * FROM raw_aemo_metadata_html.column_explanations".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "table_descriptions".to_string(),
+                required_objects: vec!["raw_aemo_metadata_html.table_explanations".to_string()],
+                sql: "SELECT * FROM raw_aemo_metadata_html.table_explanations".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "population_dates".to_string(),
+                required_objects: vec!["raw_aemo_metadata_html.population_dates".to_string()],
+                sql: "SELECT * FROM raw_aemo_metadata_html.population_dates".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "data_availability".to_string(),
+                required_objects: Vec::new(),
+                sql: "SELECT database, name AS physical_table, total_rows, total_bytes, formatReadableSize(total_bytes) AS human_size FROM system.tables WHERE (database LIKE 'raw_aemo%') AND (name NOT LIKE 'observed%') ORDER BY database, name".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "table_locator".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_table_locator".to_string(),
+                    "semantic.mmsdm_table_locator".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_table_locator UNION ALL SELECT * FROM semantic.mmsdm_table_locator".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "schema_registry".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_schema_registry".to_string(),
+                    "semantic.mmsdm_schema_registry".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_schema_registry UNION ALL SELECT * FROM semantic.mmsdm_schema_registry".to_string(),
+            },
+        ]
     }
 }
 

@@ -12,8 +12,8 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
     DiscoveredArtifact, DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities,
     PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
-    SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument,
-    SourcePlugin, TaskBlueprint, TaskKind,
+    SemanticJob, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
+    SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -261,6 +261,106 @@ impl SourcePlugin for NemwebPlugin {
             },
         ];
         PROMOTIONS
+    }
+
+    fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        vec![
+            SemanticJob::ConsolidateObservedSchemaViews {
+                target_database: "semantic".to_string(),
+                include_latest_alias: true,
+                naming_strategy: SemanticNamingStrategy::Default,
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "nemweb_table_locator".to_string(),
+                required_objects: vec!["raw_aemo_nemweb.observed_schemas".to_string()],
+                sql: "SELECT logical_section, logical_table, report_version, physical_table, 'raw_aemo_nemweb' AS database_name, column_count, schema_hash, first_seen_at, last_seen_at FROM raw_aemo_nemweb.observed_schemas WHERE physical_table != '' GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash, first_seen_at, last_seen_at".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "nemweb_schema_registry".to_string(),
+                required_objects: vec!["raw_aemo_nemweb.observed_schemas".to_string()],
+                sql: "SELECT DISTINCT logical_section, logical_table, report_version, physical_table, column_count, schema_hash, min(first_seen_at) AS first_seen, max(last_seen_at) AS last_seen FROM raw_aemo_nemweb.observed_schemas GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "table_locator".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_table_locator".to_string(),
+                    "semantic.mmsdm_table_locator".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_table_locator UNION ALL SELECT * FROM semantic.mmsdm_table_locator".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "schema_registry".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_schema_registry".to_string(),
+                    "semantic.mmsdm_schema_registry".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_schema_registry UNION ALL SELECT * FROM semantic.mmsdm_schema_registry".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "actual_gen_duid".to_string(),
+                required_objects: vec!["semantic.meter_data_gen_duid".to_string()],
+                sql: "SELECT * FROM semantic.meter_data_gen_duid".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "bid_dayoffer".to_string(),
+                required_objects: vec!["semantic.bid_biddayoffer_d".to_string()],
+                sql: "SELECT * FROM semantic.bid_biddayoffer_d".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "bid_peroffer".to_string(),
+                required_objects: vec!["semantic.bid_bidperoffer_d".to_string()],
+                sql: "SELECT * FROM semantic.bid_bidperoffer_d".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "daily_region_dispatch".to_string(),
+                required_objects: vec!["semantic.dregion".to_string()],
+                sql: "SELECT * FROM semantic.dregion".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "daily_unit_dispatch".to_string(),
+                required_objects: vec!["semantic.dunit".to_string()],
+                sql: "SELECT * FROM semantic.dunit".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "dispatch_regionfcas".to_string(),
+                required_objects: vec!["semantic.dispatch_regionfcasrequirement".to_string()],
+                sql: "SELECT * FROM semantic.dispatch_regionfcasrequirement".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "intermittent_gen_scada".to_string(),
+                required_objects: vec!["semantic.demand_intermittent_gen_scada".to_string()],
+                sql: "SELECT * FROM semantic.demand_intermittent_gen_scada".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "marginal_loss_factors".to_string(),
+                required_objects: vec!["semantic.daily_mlf".to_string()],
+                sql: "SELECT * FROM semantic.daily_mlf".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "mtpasa_duid_availability".to_string(),
+                required_objects: vec!["semantic.mtpasa_duidavailability".to_string()],
+                sql: "SELECT * FROM semantic.mtpasa_duidavailability".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "next_day_energy_bids".to_string(),
+                required_objects: vec!["semantic.bids_bidofferperiod_sparse".to_string()],
+                sql: "SELECT * FROM semantic.bids_bidofferperiod_sparse".to_string(),
+            },
+        ]
     }
 }
 

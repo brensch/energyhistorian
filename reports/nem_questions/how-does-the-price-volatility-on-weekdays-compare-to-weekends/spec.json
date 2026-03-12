@@ -1,0 +1,7 @@
+{
+  "question": "How does the price volatility on weekdays compare to weekends?",
+  "slug": "how-does-the-price-volatility-on-weekdays-compare-to-weekends",
+  "status": "ready",
+  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes.",
+  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

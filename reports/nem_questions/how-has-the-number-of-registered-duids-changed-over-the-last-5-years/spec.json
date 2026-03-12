@@ -1,0 +1,7 @@
+{
+  "question": "How has the number of registered DUIDs changed over the last 5 years?",
+  "slug": "how-has-the-number-of-registered-duids-changed-over-the-last-5-years",
+  "status": "ready",
+  "data_description": "This report is derived from the following semantic surfaces in ClickHouse: `semantic.participant_registration_dudetail`, a historical MMSDM registration view with effective-dated DUID registration details. `semantic.participant_registration_dudetailsummary`, a historical MMSDM summary view for DUID registration periods and start dates.",
+  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
+}

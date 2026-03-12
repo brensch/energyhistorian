@@ -1,0 +1,2 @@
+status,reason
+blocked,This needs a forecast-horizon mart that keeps multiple predispatch runs for the same target interval.

@@ -1,0 +1,1 @@
+SELECT 'blocked' AS status, 'Unserved energy cost needs a USE or involuntary load shedding dataset.' AS reason

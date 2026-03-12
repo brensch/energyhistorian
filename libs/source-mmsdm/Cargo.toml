@@ -11,4 +11,5 @@ ingest-core = { path = "../ingest-core" }
 regex = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
 sha2 = "0.10"
+tracing = "0.1"
 source-nemweb = { path = "../source-nemweb" }
