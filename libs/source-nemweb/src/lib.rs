@@ -12,8 +12,9 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
     DiscoveredArtifact, DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities,
     PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
-    SemanticJob, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
+    SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
     SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    semantic_model_registry_sql,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -79,6 +80,289 @@ impl NemwebPlugin {
         parsed_dir: &Path,
     ) -> Result<NemwebIngestResult> {
         ingest::ingest_recent(source_family_id, limit, raw_dir, parsed_dir).await
+    }
+
+    fn semantic_models(&self) -> Vec<SemanticModel> {
+        vec![
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.dispatch_price",
+                "Regional 5-minute energy and FCAS price outcomes by settlement interval.",
+                "one row per settlement interval per region",
+                Some("SETTLEMENTDATE"),
+                &["REGIONID"],
+                &[
+                    "RRP",
+                    "RAISE6SECRRP",
+                    "RAISE60SECRRP",
+                    "RAISE5MINRRP",
+                    "RAISEREGRRP",
+                    "LOWER6SECRRP",
+                    "LOWER60SECRRP",
+                    "LOWER5MINRRP",
+                    "LOWERREGRRP",
+                ],
+                &["semantic.daily_region_dispatch on SETTLEMENTDATE, REGIONID"],
+                &["Operational price outcomes, not settlement amounts."],
+                &["price", "volatility", "fcas", "region", "spread"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.daily_region_dispatch",
+                "Regional dispatch outcomes, demand, interchange, available generation, and regional FCAS enablement by settlement interval.",
+                "one row per settlement interval per region",
+                Some("SETTLEMENTDATE"),
+                &["REGIONID"],
+                &[
+                    "RRP",
+                    "TOTALDEMAND",
+                    "DEMANDFORECAST",
+                    "DISPATCHABLEGENERATION",
+                    "NETINTERCHANGE",
+                    "AVAILABLEGENERATION",
+                    "EXCESSGENERATION",
+                    "RAISE6SECDISPATCH",
+                    "RAISE60SECDISPATCH",
+                    "RAISE5MINDISPATCH",
+                    "RAISEREGLOCALDISPATCH",
+                    "LOWER6SECDISPATCH",
+                    "LOWER60SECDISPATCH",
+                    "LOWER5MINDISPATCH",
+                    "LOWERREGLOCALDISPATCH",
+                ],
+                &["semantic.dispatch_price on SETTLEMENTDATE, REGIONID"],
+                &["Operational regional dispatch fact, not settlement-grade billing."],
+                &["demand", "dispatch", "region", "imports", "fcas", "price"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.daily_unit_dispatch",
+                "Unit-level dispatch targets, availability, ramp rates, and FCAS enablement by settlement interval.",
+                "one row per settlement interval per DUID",
+                Some("SETTLEMENTDATE"),
+                &["DUID"],
+                &[
+                    "TOTALCLEARED",
+                    "INITIALMW",
+                    "AVAILABILITY",
+                    "RAMPUPRATE",
+                    "RAMPDOWNRATE",
+                    "RAISE6SEC",
+                    "RAISE60SEC",
+                    "RAISE5MIN",
+                    "RAISEREG",
+                    "LOWER6SEC",
+                    "LOWER60SEC",
+                    "LOWER5MIN",
+                    "LOWERREG",
+                ],
+                &["semantic.unit_dimension on DUID"],
+                &["Dispatch targets are operational outcomes, not metered generation."],
+                &["duid", "dispatch", "ramp", "battery", "fcas"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.dispatch_unit_solution",
+                "Richer unit dispatch solution surface including UIGF, storage, and semi-scheduled fields by settlement interval.",
+                "one row per settlement interval per DUID",
+                Some("SETTLEMENTDATE"),
+                &["DUID"],
+                &[
+                    "TOTALCLEARED",
+                    "UIGF",
+                    "ENERGY_STORAGE",
+                    "INITIAL_ENERGY_STORAGE",
+                ],
+                &["semantic.unit_dimension on DUID"],
+                &[
+                    "Use this when daily_unit_dispatch does not expose the required semi-scheduled or storage field.",
+                ],
+                &["curtailment", "uigt", "semi-scheduled", "storage"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.actual_gen_duid",
+                "Metered actual generation or energy readings by interval and DUID.",
+                "one row per interval per DUID",
+                Some("INTERVAL_DATETIME"),
+                &["DUID"],
+                &["MWH_READING"],
+                &["semantic.unit_dimension on DUID"],
+                &["Best actual-generation surface for output and generation mix questions."],
+                &["generation", "actual", "fuel", "duid", "mix"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.dispatch_unit_scada",
+                "SCADA telemetry values by settlement interval and DUID.",
+                "one row per settlement interval per DUID",
+                Some("SETTLEMENTDATE"),
+                &["DUID"],
+                &["SCADAVALUE"],
+                &["semantic.unit_dimension on DUID"],
+                &["Telemetry surface rather than settlement or metered energy."],
+                &["scada", "telemetry", "generator"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.dispatch_interconnectorres",
+                "Interconnector dispatch results including flow, metered flow, limits, losses, and marginal value.",
+                "one row per settlement interval per interconnector",
+                Some("SETTLEMENTDATE"),
+                &["INTERCONNECTORID"],
+                &[
+                    "MWFLOW",
+                    "METEREDMWFLOW",
+                    "MWLOSSES",
+                    "EXPORTLIMIT",
+                    "IMPORTLIMIT",
+                    "MARGINALVALUE",
+                ],
+                &["semantic.dispatch_price by aligned settlement interval for spread analysis"],
+                &[
+                    "Interconnector-region mapping is semantic knowledge rather than explicit table columns.",
+                ],
+                &["interconnector", "flow", "limit", "loss", "spread"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.dispatch_constraint",
+                "Constraint outcomes by settlement interval and constraint identifier.",
+                "one row per settlement interval per constraint",
+                Some("SETTLEMENTDATE"),
+                &["CONSTRAINTID"],
+                &["RHS", "LHS", "MARGINALVALUE", "VIOLATIONDEGREE"],
+                &[],
+                &[
+                    "Constraint type may need to be proxied from CONSTRAINTID unless a dedicated dimension is added.",
+                ],
+                &["constraint", "binding", "shadow price"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.predispatch_region_prices",
+                "Predispatch regional price forecasts.",
+                "one row per forecast interval per region",
+                Some("DATETIME"),
+                &["REGIONID"],
+                &["RRP"],
+                &["semantic.dispatch_price on DATETIME = SETTLEMENTDATE and REGIONID"],
+                &[
+                    "Forecast horizon logic is still thin; good for point forecast versus actual, not full horizon analytics.",
+                ],
+                &["forecast", "predispatch", "price"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.p5min_regionsolution",
+                "5-minute ahead regional forecast and solution outputs by run time and target interval.",
+                "one row per target interval, run time, and region",
+                Some("INTERVAL_DATETIME"),
+                &["RUN_DATETIME", "REGIONID"],
+                &["RRP", "TOTALDEMAND", "DEMANDFORECAST"],
+                &["semantic.dispatch_price on INTERVAL_DATETIME = SETTLEMENTDATE and REGIONID"],
+                &[
+                    "Use RUN_DATETIME to choose the forecast snapshot before comparing to actual outcomes.",
+                ],
+                &["forecast", "p5", "price", "demand"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.bid_dayoffer",
+                "Daily bid price bands and rebid explanations by DUID, participant, and bid type.",
+                "one row per settlement day per DUID per participant per bid type",
+                Some("SETTLEMENTDATE"),
+                &["DUID", "PARTICIPANTID", "BIDTYPE"],
+                &[
+                    "VERSIONNO",
+                    "PRICEBAND1",
+                    "PRICEBAND2",
+                    "PRICEBAND3",
+                    "PRICEBAND4",
+                    "PRICEBAND5",
+                    "PRICEBAND6",
+                    "PRICEBAND7",
+                    "PRICEBAND8",
+                    "PRICEBAND9",
+                    "PRICEBAND10",
+                ],
+                &[
+                    "semantic.bid_peroffer on SETTLEMENTDATE, DUID, BIDTYPE",
+                    "semantic.unit_dimension on DUID",
+                ],
+                &["Day offers describe offered prices, not dispatched quantities."],
+                &["bids", "rebid", "offers", "fuel"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.bid_peroffer",
+                "Interval bid availabilities by DUID and bid type.",
+                "one row per interval per DUID per bid type",
+                Some("INTERVAL_DATETIME"),
+                &["DUID", "BIDTYPE"],
+                &[
+                    "MAXAVAIL",
+                    "BANDAVAIL1",
+                    "BANDAVAIL2",
+                    "BANDAVAIL3",
+                    "BANDAVAIL4",
+                    "BANDAVAIL5",
+                    "BANDAVAIL6",
+                    "BANDAVAIL7",
+                    "BANDAVAIL8",
+                    "BANDAVAIL9",
+                    "BANDAVAIL10",
+                ],
+                &["semantic.bid_dayoffer on SETTLEMENTDATE, DUID, BIDTYPE"],
+                &["Band availability is an offer surface, not actual dispatch."],
+                &["bids", "availability", "offers"],
+            ),
+            semantic_model(
+                "aemo.nemweb",
+                "semantic.marginal_loss_factors",
+                "Marginal loss factor reference surface by DUID and connection point.",
+                "one row per effective date per DUID or connection point",
+                Some("EFFECTIVEDATE"),
+                &["DUID", "REGIONID", "CONNECTIONPOINTID"],
+                &["TRANSMISSIONLOSSFACTOR", "SECONDARY_TLF"],
+                &["semantic.unit_dimension on DUID"],
+                &["Reference factor table rather than interval fact data."],
+                &["mlf", "loss factor", "reference"],
+            ),
+        ]
+    }
+}
+
+fn semantic_model(
+    source_id: &str,
+    object_name: &str,
+    description: &str,
+    grain: &str,
+    time_column: Option<&str>,
+    dimensions: &[&str],
+    measures: &[&str],
+    join_keys: &[&str],
+    caveats: &[&str],
+    question_tags: &[&str],
+) -> SemanticModel {
+    SemanticModel {
+        source_id: source_id.to_string(),
+        object_name: object_name.to_string(),
+        object_kind: "view".to_string(),
+        description: description.to_string(),
+        grain: grain.to_string(),
+        time_column: time_column.map(str::to_string),
+        dimensions: dimensions
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        measures: measures.iter().map(|value| (*value).to_string()).collect(),
+        join_keys: join_keys.iter().map(|value| (*value).to_string()).collect(),
+        caveats: caveats.iter().map(|value| (*value).to_string()).collect(),
+        question_tags: question_tags
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
     }
 }
 
@@ -264,6 +548,7 @@ impl SourcePlugin for NemwebPlugin {
     }
 
     fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        let semantic_registry_sql = semantic_model_registry_sql(&self.semantic_models());
         vec![
             SemanticJob::ConsolidateObservedSchemaViews {
                 target_database: "semantic".to_string(),
@@ -284,6 +569,12 @@ impl SourcePlugin for NemwebPlugin {
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
+                view_name: "nemweb_model_registry".to_string(),
+                required_objects: Vec::new(),
+                sql: semantic_registry_sql,
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
                 view_name: "table_locator".to_string(),
                 required_objects: vec![
                     "semantic.nemweb_table_locator".to_string(),
@@ -299,6 +590,15 @@ impl SourcePlugin for NemwebPlugin {
                     "semantic.mmsdm_schema_registry".to_string(),
                 ],
                 sql: "SELECT * FROM semantic.nemweb_schema_registry UNION ALL SELECT * FROM semantic.mmsdm_schema_registry".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "semantic_model_registry".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_model_registry".to_string(),
+                    "semantic.mmsdm_model_registry".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_model_registry UNION ALL SELECT * FROM semantic.mmsdm_model_registry".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),

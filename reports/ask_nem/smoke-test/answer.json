@@ -1,0 +1,14 @@
+{
+  "question": "Which participants own the most registered generation capacity?",
+  "status": "answerable",
+  "confidence": "high",
+  "used_objects": [
+    "semantic.unit_dimension"
+  ],
+  "data_description": "Top 20 participants by total registered generation capacity (MW), summed across all current DUIDs in the unit dimension.",
+  "note": "High confidence: totals are summed from semantic.unit_dimension REGISTEREDCAPACITY_MW (>0) by EFFECTIVE_PARTICIPANTID across all current DUIDs. Figures represent registered nameplate/discharge capability, not real-time availability or energy-limited output. This is a current-state snapshot (de-registered units excluded) and may include storage discharge and special/programmatic registrations (e.g., BASSLINK, VBBHMCA3, NEMRESTR), so interpret rankings as per MMS participant ownership rather than technology groupings.",
+  "reason": "REGISTEREDCAPACITY_MW and participant identifiers are directly available in semantic.unit_dimension; no joins or proxies are required.",
+  "sql": "SELECT\n  coalesce(EFFECTIVE_PARTICIPANTID, PARTICIPANTID) AS PARTICIPANT,\n  sum(REGISTEREDCAPACITY_MW) AS TOTAL_REGISTERED_CAPACITY_MW\nFROM semantic.unit_dimension\nWHERE REGISTEREDCAPACITY_MW > 0\nGROUP BY coalesce(EFFECTIVE_PARTICIPANTID, PARTICIPANTID)\nORDER BY TOTAL_REGISTERED_CAPACITY_MW DESC\nLIMIT 20;",
+  "registry_source": "fallback",
+  "generated_at": "2026-03-12T08:30:16.220676+00:00"
+}

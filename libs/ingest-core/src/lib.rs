@@ -29,7 +29,9 @@ pub use schema::{
     SchemaVersionKey,
 };
 pub use schema_registry::{FileSchemaRegistry, SchemaRegistrationOutcome};
-pub use semantic::{SemanticJob, SemanticNamingStrategy};
+pub use semantic::{
+    SemanticJob, SemanticModel, SemanticNamingStrategy, semantic_model_registry_sql,
+};
 pub use source_family::{SourceFamily, SourceFamilyCatalogEntry};
 pub use state::{ArtifactProcessingStatus, ProcessingCheckpoint, ProcessingEvent};
 pub use type_inference::ColumnTypeInference;

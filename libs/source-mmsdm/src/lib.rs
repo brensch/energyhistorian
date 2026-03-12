@@ -7,8 +7,9 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
     DiscoveredArtifact, DiscoveryCursorHint, DiscoveryRequest, LocalArtifact, ParseResult,
     PluginCapabilities, PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult,
-    RuntimeSourcePlugin, SemanticJob, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
-    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    RuntimeSourcePlugin, SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection,
+    SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    semantic_model_registry_sql,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -99,6 +100,168 @@ impl MmsdmPlugin {
     ) -> Result<()> {
         let plan = source_nemweb::parse::inspect_local_archive(artifact)?;
         source_nemweb::parse::stream_local_archive_rows(artifact, &plan, sink)
+    }
+
+    fn semantic_models(&self) -> Vec<SemanticModel> {
+        vec![
+            semantic_model(
+                "aemo.mmsdm",
+                "semantic.unit_dimension",
+                "Current reconciled DUID dimension derived from MMSDM registration history.",
+                "one row per DUID in current effective state",
+                Some("START_DATE"),
+                &[
+                    "DUID",
+                    "REGIONID",
+                    "PARTICIPANTID",
+                    "EFFECTIVE_PARTICIPANTID",
+                    "STATIONID",
+                    "STATIONNAME",
+                    "FUEL_TYPE",
+                    "DISPATCHTYPE",
+                    "SCHEDULE_TYPE",
+                    "IS_STORAGE",
+                    "IS_BIDIRECTIONAL",
+                ],
+                &[
+                    "REGISTEREDCAPACITY_MW",
+                    "MAXCAPACITY_MW",
+                    "MAXSTORAGECAPACITY_MWH",
+                    "CO2E_EMISSIONS_FACTOR",
+                    "TRANSMISSIONLOSSFACTOR",
+                    "DISTRIBUTIONLOSSFACTOR",
+                    "MAX_RAMP_RATE_UP",
+                    "MAX_RAMP_RATE_DOWN",
+                ],
+                &[
+                    "semantic.daily_unit_dispatch on DUID",
+                    "semantic.actual_gen_duid on DUID",
+                    "semantic.bid_dayoffer on DUID",
+                ],
+                &["Current-state dimension built from historised MMSDM registration sources."],
+                &[
+                    "duid",
+                    "participant",
+                    "station",
+                    "fuel",
+                    "capacity",
+                    "battery",
+                ],
+            ),
+            semantic_model(
+                "aemo.mmsdm",
+                "semantic.participant_registration_dudetail",
+                "Historised MMSDM DUID registration detail records.",
+                "one row per effective-dated DUID detail record",
+                Some("EFFECTIVEDATE"),
+                &["DUID", "DISPATCHTYPE"],
+                &["MAXSTORAGECAPACITY"],
+                &["semantic.participant_registration_dudetailsummary on DUID"],
+                &[
+                    "Historised raw semantic registration surface, useful for registration timelines.",
+                ],
+                &["registration", "history", "battery", "duid"],
+            ),
+            semantic_model(
+                "aemo.mmsdm",
+                "semantic.participant_registration_dudetailsummary",
+                "Historised MMSDM DUID summary registration records.",
+                "one row per effective-dated DUID summary record",
+                Some("START_DATE"),
+                &[
+                    "DUID",
+                    "REGIONID",
+                    "PARTICIPANTID",
+                    "STATIONID",
+                    "DISPATCHTYPE",
+                    "SCHEDULE_TYPE",
+                ],
+                &[
+                    "TRANSMISSIONLOSSFACTOR",
+                    "DISTRIBUTIONLOSSFACTOR",
+                    "MAX_RAMP_RATE_UP",
+                    "MAX_RAMP_RATE_DOWN",
+                    "MINIMUM_ENERGY_PRICE",
+                    "MAXIMUM_ENERGY_PRICE",
+                ],
+                &["semantic.unit_dimension on DUID"],
+                &["Historised MMSDM registration summary surface."],
+                &["registration", "history", "duid", "participant"],
+            ),
+            semantic_model(
+                "aemo.mmsdm",
+                "semantic.participant_registration_station",
+                "Historised MMSDM station metadata including station name and state.",
+                "one row per station record change",
+                Some("LASTCHANGED"),
+                &["STATIONID", "STATIONNAME", "STATE"],
+                &[],
+                &["semantic.unit_dimension on STATIONID"],
+                &["Station metadata is historised and may include multiple revisions per station."],
+                &["station", "metadata", "registration"],
+            ),
+            semantic_model(
+                "aemo.mmsdm",
+                "semantic.participant_registration_stationowner",
+                "Historised MMSDM station ownership records.",
+                "one row per effective-dated station owner record",
+                Some("EFFECTIVEDATE"),
+                &["STATIONID", "PARTICIPANTID"],
+                &[],
+                &["semantic.unit_dimension on STATIONID"],
+                &[
+                    "Ownership can change over time; unit_dimension carries only the current effective owner.",
+                ],
+                &["ownership", "station", "participant"],
+            ),
+            semantic_model(
+                "aemo.mmsdm",
+                "semantic.participant_registration_genunits",
+                "Historised MMSDM generating unit records with energy source, capacity, and emissions factors.",
+                "one row per GENSET record change",
+                Some("LASTCHANGED"),
+                &["GENSETID", "GENSETTYPE", "CO2E_ENERGY_SOURCE"],
+                &["REGISTEREDCAPACITY", "MAXCAPACITY", "CO2E_EMISSIONS_FACTOR"],
+                &["semantic.unit_dimension on GENSETID"],
+                &[
+                    "Fuel and emissions metadata originates here before current-state reconciliation into unit_dimension.",
+                ],
+                &["fuel", "capacity", "emissions", "registration"],
+            ),
+        ]
+    }
+}
+
+fn semantic_model(
+    source_id: &str,
+    object_name: &str,
+    description: &str,
+    grain: &str,
+    time_column: Option<&str>,
+    dimensions: &[&str],
+    measures: &[&str],
+    join_keys: &[&str],
+    caveats: &[&str],
+    question_tags: &[&str],
+) -> SemanticModel {
+    SemanticModel {
+        source_id: source_id.to_string(),
+        object_name: object_name.to_string(),
+        object_kind: "view".to_string(),
+        description: description.to_string(),
+        grain: grain.to_string(),
+        time_column: time_column.map(str::to_string),
+        dimensions: dimensions
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        measures: measures.iter().map(|value| (*value).to_string()).collect(),
+        join_keys: join_keys.iter().map(|value| (*value).to_string()).collect(),
+        caveats: caveats.iter().map(|value| (*value).to_string()).collect(),
+        question_tags: question_tags
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
     }
 }
 
@@ -214,6 +377,7 @@ impl SourcePlugin for MmsdmPlugin {
     }
 
     fn semantic_jobs(&self) -> Vec<SemanticJob> {
+        let semantic_registry_sql = semantic_model_registry_sql(&self.semantic_models());
         vec![
             SemanticJob::ConsolidateObservedSchemaViews {
                 target_database: "semantic".to_string(),
@@ -234,6 +398,12 @@ impl SourcePlugin for MmsdmPlugin {
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
+                view_name: "mmsdm_model_registry".to_string(),
+                required_objects: Vec::new(),
+                sql: semantic_registry_sql,
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
                 view_name: "table_locator".to_string(),
                 required_objects: vec![
                     "semantic.nemweb_table_locator".to_string(),
@@ -249,6 +419,15 @@ impl SourcePlugin for MmsdmPlugin {
                     "semantic.mmsdm_schema_registry".to_string(),
                 ],
                 sql: "SELECT * FROM semantic.nemweb_schema_registry UNION ALL SELECT * FROM semantic.mmsdm_schema_registry".to_string(),
+            },
+            SemanticJob::SqlView {
+                target_database: "semantic".to_string(),
+                view_name: "semantic_model_registry".to_string(),
+                required_objects: vec![
+                    "semantic.nemweb_model_registry".to_string(),
+                    "semantic.mmsdm_model_registry".to_string(),
+                ],
+                sql: "SELECT * FROM semantic.nemweb_model_registry UNION ALL SELECT * FROM semantic.mmsdm_model_registry".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),

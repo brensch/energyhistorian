@@ -1,0 +1,14 @@
+{
+  "question": "Which participants own the most registered generation capacity?",
+  "status": "answerable",
+  "confidence": "high",
+  "used_objects": [
+    "semantic.unit_dimension"
+  ],
+  "data_description": "Aggregates the registered generation capacity in MW by participant from the current unit dimension data reflecting MMSDM registration.",
+  "note": "The results are derived from the unit_dimension object, which contains the most up-to-date and reconciled registered generation capacity per DUID and participant. While this is a high-confidence proxy for ownership, the data should not be considered settlement-grade, as it reflects registered capacity rather than real-time dispatched or operational capacity.",
+  "reason": "The unit_dimension object provides current registered capacity by participant, which directly answers which participants own the most generation capacity.",
+  "sql": "SELECT PARTICIPANTID, SUM(REGISTEREDCAPACITY_MW) AS TOTAL_REGISTERED_CAPACITY_MW\nFROM semantic.unit_dimension\nGROUP BY PARTICIPANTID\nORDER BY TOTAL_REGISTERED_CAPACITY_MW DESC\nLIMIT 10",
+  "registry_source": "fallback",
+  "generated_at": "2026-03-12T08:31:15.907940+00:00"
+}

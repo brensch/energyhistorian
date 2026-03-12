@@ -1,0 +1,14 @@
+{
+  "question": "Which participants own the most registered generation capacity?",
+  "status": "answerable",
+  "confidence": "high",
+  "used_objects": [
+    "semantic.unit_dimension"
+  ],
+  "data_description": "One row per participant with the sum of current-state REGISTEREDCAPACITY_MW from the reconciled unit_dimension (total registered generation capacity in MW).",
+  "note": "This uses the reconciled current PARTICIPANTID in semantic.unit_dimension \u2014 suitable for understanding present ownership. If you need owner-at-a-specific-date (historical ownership) query the historised participant/registration tables instead. Data is reported in MW and the plan indicates high confidence in this current reconciled view, but it is not a settlement-grade certification; verify against official AEMO records for settlement or contractual decisions.",
+  "reason": "unit_dimension exposes current reconciled PARTICIPANTID and REGISTEREDCAPACITY_MW, which directly answers who currently owns the most registered capacity.",
+  "sql": "SELECT\n  PARTICIPANTID,\n  SUM(REGISTEREDCAPACITY_MW) AS total_registered_capacity_mw\nFROM semantic.unit_dimension\nWHERE PARTICIPANTID IS NOT NULL\n  AND REGISTEREDCAPACITY_MW IS NOT NULL\nGROUP BY PARTICIPANTID\nORDER BY total_registered_capacity_mw DESC\nLIMIT 20;",
+  "registry_source": "clickhouse",
+  "generated_at": "2026-03-12T08:42:08.694085+00:00"
+}

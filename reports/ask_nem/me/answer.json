@@ -1,0 +1,15 @@
+{
+  "question": "How much energy was used in victoria by type for the last 7 days, broken down by day and type",
+  "status": "answerable",
+  "confidence": "medium",
+  "used_objects": [
+    "semantic.actual_gen_duid",
+    "semantic.unit_dimension"
+  ],
+  "data_description": "Daily total metered generation (MWh) by fuel type for the Victoria region for the last 7 calendar days (grouped by day and fuel type).",
+  "note": "Confidence: medium. Do not treat this as settlement-grade data. Common reasons for no-results: (1) data for the requested days has not been ingested yet or there is an ingestion lag/timezone mismatch; (2) REGIONID value differs (e.g., alternative region code or NULL); (3) the join removed rows (unit_dimension entries missing or mismatched keys); or (4) you intended consumer demand rather than generation \u2014 in that case use semantic.daily_region_dispatch.TOTALDEMAND. Suggested next steps: confirm the exact date range/timezone, verify REGIONID values in unit_dimension, run the query without the join to check raw actual_gen_duid records, expand the timeframe to 30 days to check data presence, or ask me to prepare an alternative query using TOTALDEMAND if you mean consumption.",
+  "reason": "The registry provides actual generation readings and a unit dimension with fuel type and region, so we can sum MWH by day and fuel type. Lowered confidence because 'used' could alternatively refer to demand rather than generation.",
+  "sql": "SELECT\n  toDate(a.INTERVAL_DATETIME) AS day,\n  u.FUEL_TYPE AS fuel_type,\n  sum(a.MWH_READING) AS energy_mwh\nFROM semantic.actual_gen_duid AS a\nJOIN semantic.unit_dimension AS u\n  ON a.DUID = u.DUID\nWHERE u.REGIONID = 'VIC'\n  AND toDate(a.INTERVAL_DATETIME) >= today() - 6\nGROUP BY day, fuel_type\nORDER BY day DESC, fuel_type",
+  "registry_source": "clickhouse",
+  "generated_at": "2026-03-12T08:46:03.169435+00:00"
+}
