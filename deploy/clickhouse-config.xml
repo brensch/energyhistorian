@@ -1,0 +1,22 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- Per-query memory limit: 1.5 GB -->
+            <max_memory_usage>1500000000</max_memory_usage>
+            <!-- All queries combined: 2.5 GB -->
+            <max_memory_usage_for_all_queries>2500000000</max_memory_usage_for_all_queries>
+            <!-- Spill to disk for GROUP BY / ORDER BY above 500 MB -->
+            <max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>500000000</max_bytes_before_external_sort>
+        </default>
+    </profiles>
+
+    <!-- Server-level cache limits -->
+    <mark_cache_size>536870912</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+
+    <!-- Limit merge memory -->
+    <merge_tree>
+        <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool>
+    </merge_tree>
+</clickhouse>

@@ -1,14 +1,20 @@
-.venv/
+# Rust
+/target/
+
+# Python
+.venv*/
 __pycache__/
 *.pyc
 
-/target/
-/data/raw/
-/data/parsed/
-/vendor/
-
+# Runtime data
+/data/
+/logs/
+/run/
+/reports/
 *.sqlite*
 
-.venv*
-
+# Secrets
 .env
+
+# Vendored
+/vendor/

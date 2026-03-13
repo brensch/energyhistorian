@@ -34,7 +34,7 @@ Current local Helm defaults:
 
 - scheduler replicas: `1`
 - downloader replicas: `1`
-- parser replicas: `3`
+- parser replicas: `1`
 
 ```mermaid
 flowchart TB
@@ -47,7 +47,7 @@ flowchart TB
             direction TB
             Scheduler["schedulerd\n1 replica"]
             Downloader["downloaderd\n1 replica"]
-            Parser["parserd\n3 replicas"]
+            Parser["parserd\n1 replica"]
             Reconciler["semantic reconciliation"]
         end
 

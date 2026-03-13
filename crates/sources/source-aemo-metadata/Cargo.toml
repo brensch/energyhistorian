@@ -1,0 +1,23 @@
+[package]
+name = "source-aemo-metadata"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "fetch_catalog"
+path = "src/bin/fetch_catalog.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = "0.3"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+ingest-core = { path = "../../ingest-core" }
+ego-tree = "0.10"
+regex = "1.12"
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
+scraper = "0.24"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tracing = "0.1"

@@ -1,15 +1,34 @@
+[package]
+name = "energyhistorian"
+version = "0.1.0"
+edition = "2024"
+
 [workspace]
 members = [
-  "apps/reconcile-semantics",
-  "apps/downloaderd",
-  "apps/parserd",
-  "apps/schedulerd",
-  "libs/controlplane",
-  "libs/ingest-core",
-  "libs/runtime",
-  "libs/source-aemo-dvd",
-  "libs/source-aemo-metadata",
-  "libs/source-mmsdm",
-  "libs/source-nemweb",
+  ".",
+  "crates/ingest-core",
+  "crates/sources/source-aemo-dvd",
+  "crates/sources/source-aemo-metadata",
+  "crates/sources/source-mmsdm",
+  "crates/sources/source-nemweb",
 ]
 resolver = "2"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+ingest-core = { path = "crates/ingest-core" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+source-aemo-dvd = { path = "crates/sources/source-aemo-dvd" }
+source-aemo-metadata = { path = "crates/sources/source-aemo-metadata" }
+source-mmsdm = { path = "crates/sources/source-mmsdm" }
+source-nemweb = { path = "crates/sources/source-nemweb" }
+tokio = { version = "1.46", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

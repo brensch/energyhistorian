@@ -1,6 +1,0 @@
-apiVersion: v2
-name: energyhistorian
-description: Single-node k3s deployment for the energyhistorian control plane
-type: application
-version: 0.1.0
-appVersion: "0.1.0"
