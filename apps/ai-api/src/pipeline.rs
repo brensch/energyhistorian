@@ -845,8 +845,14 @@ fn build_plotly_figure(
         y.iter()
             .enumerate()
             .map(|(index, y_field)| {
-                let x_values = rows.iter().map(|row| row.get(x).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
-                let y_values = rows.iter().map(|row| row.get(y_field).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+                let x_values = rows
+                    .iter()
+                    .map(|row| row.get(x).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                let y_values = rows
+                    .iter()
+                    .map(|row| row.get(y_field).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
                 base_plotly_trace(
                     mark_type,
                     horizontal,
@@ -854,7 +860,11 @@ fn build_plotly_figure(
                     &y_values,
                     &prettify_column(y_field),
                     palette[index % palette.len()],
-                    preview.columns.iter().map(|column| row_column_values(&rows, column)).collect::<Vec<_>>(),
+                    preview
+                        .columns
+                        .iter()
+                        .map(|column| row_column_values(&rows, column))
+                        .collect::<Vec<_>>(),
                     &preview.columns,
                 )
             })
@@ -865,7 +875,10 @@ fn build_plotly_figure(
             .into_iter()
             .enumerate()
             .map(|(index, (group, group_rows))| {
-                let x_values = group_rows.iter().map(|row| row.get(x).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+                let x_values = group_rows
+                    .iter()
+                    .map(|row| row.get(x).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
                 let y_values = group_rows
                     .iter()
                     .map(|row| row.get(&y[0]).cloned().unwrap_or(Value::Null))
@@ -877,13 +890,20 @@ fn build_plotly_figure(
                     &y_values,
                     &group,
                     palette[index % palette.len()],
-                    preview.columns.iter().map(|column| row_column_values(&group_rows, column)).collect::<Vec<_>>(),
+                    preview
+                        .columns
+                        .iter()
+                        .map(|column| row_column_values(&group_rows, column))
+                        .collect::<Vec<_>>(),
                     &preview.columns,
                 )
             })
             .collect::<Vec<_>>()
     } else {
-        let x_values = rows.iter().map(|row| row.get(x).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+        let x_values = rows
+            .iter()
+            .map(|row| row.get(x).cloned().unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
         let y_values = rows
             .iter()
             .map(|row| row.get(&y[0]).cloned().unwrap_or(Value::Null))
@@ -895,7 +915,11 @@ fn build_plotly_figure(
             &y_values,
             &prettify_column(&y[0]),
             palette[0],
-            preview.columns.iter().map(|column| row_column_values(&rows, column)).collect::<Vec<_>>(),
+            preview
+                .columns
+                .iter()
+                .map(|column| row_column_values(&rows, column))
+                .collect::<Vec<_>>(),
             &preview.columns,
         )]
     };
@@ -1129,7 +1153,12 @@ fn preview_rows_as_objects(preview: &QueryPreview) -> Vec<serde_json::Map<String
                 .columns
                 .iter()
                 .enumerate()
-                .map(|(index, column)| (column.clone(), row.get(index).cloned().unwrap_or(Value::Null)))
+                .map(|(index, column)| {
+                    (
+                        column.clone(),
+                        row.get(index).cloned().unwrap_or(Value::Null),
+                    )
+                })
                 .collect::<serde_json::Map<String, Value>>()
         })
         .collect()
@@ -1172,11 +1201,15 @@ fn base_plotly_trace(
 ) -> Value {
     let axis_x = if horizontal { y_values } else { x_values };
     let axis_y = if horizontal { x_values } else { y_values };
-    let trace_type = if mark_type == "line" { "scatter" } else { "bar" };
+    let trace_type = if mark_type == "line" {
+        "scatter"
+    } else {
+        "bar"
+    };
     json!({
         "type": trace_type,
-        "mode": if mark_type == "line" { Some("lines+markers") } else { None::<String> },
-        "orientation": if horizontal && mark_type == "bar" { Some("h") } else { None::<String> },
+        "mode": if mark_type == "line" { Some("lines+markers") } else { None::<&str> },
+        "orientation": if horizontal && mark_type == "bar" { Some("h") } else { None::<&str> },
         "x": axis_x,
         "y": axis_y,
         "name": name,
@@ -1205,7 +1238,10 @@ fn transpose_customdata(columns: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
 fn plotly_hover_template(columns: &[String]) -> String {
     let mut template = String::new();
     for (index, column) in columns.iter().enumerate() {
-        template.push_str(&format!("{}: %{{customdata[{index}]}}<br>", prettify_column(column)));
+        template.push_str(&format!(
+            "{}: %{{customdata[{index}]}}<br>",
+            prettify_column(column)
+        ));
     }
     template.push_str("<extra></extra>");
     template
@@ -1309,16 +1345,6 @@ fn looks_like_identifier(column: &str) -> bool {
 
 fn looks_like_name(column: &str) -> bool {
     column.contains("NAME") || column.ends_with("NAME")
-}
-
-fn vega_field_type(preview: &QueryPreview, column: &str) -> &'static str {
-    if is_timeish_name(column) || column_values_look_like_datetimes(preview, column) {
-        "temporal"
-    } else if column_values_look_numeric(preview, column) {
-        "quantitative"
-    } else {
-        "nominal"
-    }
 }
 
 fn axis_title_for_column(preview: &QueryPreview, column: &str) -> String {
@@ -1508,15 +1534,20 @@ mod tests {
             sql_text: Some("SELECT ...".to_string()),
             metadata: json!({
                 "chart": {
-                    "renderer": "vega_lite",
+                    "renderer": "plotly",
                     "title": "Daily Energy by Fuel Type",
-                    "spec": {
-                        "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
-                        "mark": { "type": "line", "point": true },
-                        "encoding": {
-                            "x": { "field": "day", "type": "temporal" },
-                            "y": { "field": "mwh", "type": "quantitative" },
-                            "color": { "field": "fuel_type", "type": "nominal" }
+                    "figure": {
+                        "data": [
+                            {
+                                "type": "scatter",
+                                "mode": "lines+markers",
+                                "x": ["2026-03-02", "2026-03-02"],
+                                "y": [1528867.0, 491045.0],
+                                "name": "Fuel Type"
+                            }
+                        ],
+                        "layout": {
+                            "title": { "text": "Daily Energy by Fuel Type" }
                         }
                     }
                 },
@@ -1543,28 +1574,21 @@ mod tests {
             "Updated the previous result to a stacked bar chart."
         );
         match chart {
-            ChartSpec::VegaLite { spec, .. } => {
+            ChartSpec::Plotly { figure, .. } => {
                 assert_eq!(
-                    spec.pointer("/mark/type").and_then(|value| value.as_str()),
+                    figure
+                        .pointer("/data/0/type")
+                        .and_then(|value| value.as_str()),
                     Some("bar")
                 );
                 assert_eq!(
-                    spec.pointer("/encoding/y/stack")
+                    figure
+                        .pointer("/layout/barmode")
                         .and_then(|value| value.as_str()),
-                    Some("zero")
-                );
-                assert_eq!(
-                    spec.pointer("/encoding/x/field")
-                        .and_then(|value| value.as_str()),
-                    Some("day")
-                );
-                assert_eq!(
-                    spec.pointer("/encoding/color/field")
-                        .and_then(|value| value.as_str()),
-                    Some("fuel_type")
+                    Some("stack")
                 );
             }
-            _ => panic!("expected vega-lite chart"),
+            _ => panic!("expected plotly chart"),
         }
         assert_eq!(preview.row_count, 2);
     }
