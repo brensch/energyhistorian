@@ -21,7 +21,11 @@ use crate::orchestrator::{Stats, run_orchestrator};
 use crate::source_registry::SourceRegistry;
 
 #[derive(Debug, Parser)]
-#[command(author, version, about = "energyhistorian – single-binary data platform")]
+#[command(
+    author,
+    version,
+    about = "energyhistorian – single-binary data platform"
+)]
 struct Args {
     /// Directory for SQLite database and downloaded artifacts
     #[arg(long, env = "DATA_DIR", default_value = "./data")]

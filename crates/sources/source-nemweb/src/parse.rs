@@ -9,10 +9,10 @@ use chrono::Utc;
 use csv::StringRecord;
 use ingest_core::{
     ColumnTypeInference, LocalArtifact, LogicalTableId, ObservedSchema, ParseResult,
-    PromotionMapping, RawTableChunk, RawTableRow, RawTableRowSink, SchemaApprovalStatus,
-    SchemaColumn, SchemaVersionKey,
+    PromotionMapping, RawTableChunk, RawTableRow, RawTableRowSink, RawValue, SchemaApprovalStatus,
+    SchemaColumn, SchemaVersionKey, StructuredRow,
+    nem_time::{parse_nem_date, parse_nem_datetime},
 };
-use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
@@ -24,6 +24,7 @@ pub struct ArchiveParsePlan {
     pub raw_outputs: Vec<RawTableChunk>,
     source_id: String,
     headers_by_key: HashMap<RecordKey, Vec<String>>,
+    column_types_by_key: HashMap<RecordKey, Vec<String>>,
     schema_hash_by_key: HashMap<RecordKey, String>,
     key_order: Vec<RecordKey>,
     csv_name: String,
@@ -91,6 +92,7 @@ pub fn inspect_local_archive(artifact: &LocalArtifact) -> Result<ArchiveParsePla
     }
 
     let mut observed_schemas = Vec::<ObservedSchema>::new();
+    let mut column_types_by_key = HashMap::<RecordKey, Vec<String>>::new();
     let mut schema_hash_by_key = HashMap::<RecordKey, String>::new();
     let mut raw_outputs = Vec::<RawTableChunk>::new();
     for key in &key_order {
@@ -104,6 +106,7 @@ pub fn inspect_local_archive(artifact: &LocalArtifact) -> Result<ArchiveParsePla
         let schema = observed_schema_from_header(artifact, key, headers, &inferred_types)?;
         let schema_key = schema.schema_key.header_hash.clone();
         let row_count = row_count_by_key.get(key).copied().unwrap_or_default();
+        column_types_by_key.insert(key.clone(), inferred_types);
         schema_hash_by_key.insert(key.clone(), schema_key.clone());
         observed_schemas.push(schema);
         if row_count > 0 {
@@ -126,6 +129,7 @@ pub fn inspect_local_archive(artifact: &LocalArtifact) -> Result<ArchiveParsePla
         raw_outputs,
         source_id: artifact.metadata.source_id.clone(),
         headers_by_key,
+        column_types_by_key,
         schema_hash_by_key,
         key_order,
         csv_name,
@@ -175,6 +179,10 @@ pub fn stream_local_archive_rows(
             .headers_by_key
             .get(&key)
             .ok_or_else(|| anyhow!("data row before header for {:?}", key))?;
+        let column_types = plan
+            .column_types_by_key
+            .get(&key)
+            .ok_or_else(|| anyhow!("missing inferred types for {:?}", key))?;
         let schema_key = plan
             .schema_hash_by_key
             .get(&key)
@@ -188,13 +196,13 @@ pub fn stream_local_archive_rows(
                 &key.2,
             ),
             schema_key,
-            row: record_to_json(
+            row: record_to_structured_row(
                 &record,
                 headers,
-                artifact.metadata.source_id.as_str(),
+                column_types,
                 &plan.csv_name,
                 &artifact.metadata.acquisition_uri,
-            ),
+            )?,
         })?;
     }
 
@@ -299,50 +307,64 @@ fn typed_schema_hash(key: &RecordKey, columns: &[SchemaColumn]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn record_to_json(
+fn record_to_structured_row(
     record: &StringRecord,
     headers: &[String],
-    source_id: &str,
+    column_types: &[String],
     csv_name: &str,
     source_url: &str,
-) -> Value {
-    let mut payload = Map::new();
-    payload.insert("_source".into(), Value::String(source_id.to_string()));
-    payload.insert("_archive_entry".into(), Value::String(csv_name.to_string()));
-    payload.insert("_source_url".into(), Value::String(source_url.to_string()));
-    payload.insert(
-        "_ingested_at_utc".into(),
-        Value::String(Utc::now().to_rfc3339()),
-    );
-    payload.insert("_section".into(), json!(record.get(1).unwrap_or_default()));
-    payload.insert("_table".into(), json!(record.get(2).unwrap_or_default()));
-    payload.insert("_version".into(), json!(record.get(3).unwrap_or_default()));
-
-    for (header, value) in headers.iter().zip(record.iter().skip(4)) {
-        payload.insert(header.to_lowercase(), parse_scalar(value));
+) -> Result<StructuredRow> {
+    let mut values = Vec::with_capacity(headers.len());
+    for (idx, _) in headers.iter().enumerate() {
+        let raw = record.get(idx + 4).unwrap_or_default();
+        let source_type = column_types
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or("Nullable(Float64)");
+        values.push(parse_scalar(raw, source_type)?);
     }
 
-    Value::Object(payload)
+    Ok(StructuredRow {
+        source_url: Some(source_url.to_string()),
+        archive_entry: Some(csv_name.to_string()),
+        values,
+    })
 }
 
-fn parse_scalar(value: &str) -> Value {
+fn parse_scalar(value: &str, source_type: &str) -> Result<RawValue> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Value::Null;
+        return Ok(RawValue::Null);
     }
-    if let Ok(integer) = trimmed.parse::<i64>() {
-        return json!(integer);
+    if source_type.contains("String") {
+        return Ok(RawValue::String(trimmed.to_string()));
     }
-    if let Ok(float) = trimmed.parse::<f64>() {
-        return json!(float);
+    if source_type.contains("DateTime") {
+        let datetime = parse_nem_datetime(trimmed)
+            .ok_or_else(|| anyhow!("invalid NEM datetime `{trimmed}`"))?;
+        return Ok(RawValue::DateTime(datetime));
     }
-    Value::String(trimmed.to_string())
+    if source_type == "Date" || source_type == "Nullable(Date)" {
+        let date =
+            parse_nem_date(trimmed).ok_or_else(|| anyhow!("invalid NEM date `{trimmed}`"))?;
+        return Ok(RawValue::Date(date));
+    }
+    if source_type.contains("Float") {
+        if let Ok(integer) = trimmed.parse::<i64>() {
+            return Ok(RawValue::Int64(integer));
+        }
+        let float = trimmed
+            .parse::<f64>()
+            .with_context(|| format!("invalid float `{trimmed}`"))?;
+        return Ok(RawValue::Float64(float));
+    }
+    Ok(RawValue::String(trimmed.to_string()))
 }
 
 #[derive(Default)]
 struct MaterializingRowSink {
     order: Vec<(String, String)>,
-    rows_by_output: HashMap<(String, String), Vec<Value>>,
+    rows_by_output: HashMap<(String, String), Vec<StructuredRow>>,
 }
 
 impl RawTableRowSink for MaterializingRowSink {

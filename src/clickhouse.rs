@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use ingest_core::{
-    LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, plan_raw_table_in_database,
+    LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, RawValue, StructuredRow,
+    plan_raw_table_in_database,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -55,7 +56,7 @@ impl ClickHousePublisher {
         self.ensure_tables(source_id, collection_id, &result.observed_schemas)
             .await?;
 
-        let processed_at = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let processed_at = Utc::now();
         let mut rows_written = 0usize;
         for chunk in &result.raw_outputs {
             let schema = schemas_by_hash
@@ -72,7 +73,7 @@ impl ClickHousePublisher {
                     collection_id,
                     artifact_id,
                     remote_uri,
-                    &processed_at,
+                    processed_at,
                     &chunk.rows,
                 )
                 .await?;
@@ -149,15 +150,37 @@ impl ClickHousePublisher {
         collection_id: &str,
         artifact_id: &str,
         remote_uri: &str,
-        processed_at: &str,
-        rows: &[Value],
+        processed_at: DateTime<Utc>,
+        rows: &[StructuredRow],
     ) -> Result<usize> {
         let plan = plan_raw_table_in_database(&raw_database_name(source_id), schema);
-        let prefix = format!("INSERT INTO {} FORMAT JSONEachRow\n", plan.full_name);
-        let mut statement = prefix.clone();
-        let mut rows_in_batch = 0usize;
+        let column_types = schema
+            .columns
+            .iter()
+            .map(|column| {
+                parse_clickhouse_type(
+                    column
+                        .source_data_type
+                        .as_deref()
+                        .unwrap_or("Nullable(String)"),
+                )
+                .with_context(|| format!("parsing type for column {}", column.name))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sql = format!(
+            "INSERT INTO {} ({}) FORMAT RowBinary",
+            plan.full_name,
+            raw_insert_column_list(schema)
+        );
+        let capacity = rows
+            .iter()
+            .map(StructuredRow::estimated_binary_size)
+            .sum::<usize>()
+            + (rows.len() * 96);
+        let mut body = Vec::with_capacity(capacity);
         for row in rows {
-            let line = build_insert_row(
+            encode_raw_row(
+                &mut body,
                 schema,
                 source_id,
                 collection_id,
@@ -165,25 +188,10 @@ impl ClickHousePublisher {
                 remote_uri,
                 processed_at,
                 row,
+                &column_types,
             )?;
-            let encoded = serde_json::to_string(&line)?;
-            let would_exceed_rows = rows_in_batch >= MAX_INSERT_ROWS;
-            let would_exceed_bytes =
-                rows_in_batch > 0 && statement.len() + encoded.len() + 1 > MAX_INSERT_BYTES;
-            if would_exceed_rows || would_exceed_bytes {
-                self.execute_sql(&statement).await?;
-                statement.clear();
-                statement.push_str(&prefix);
-                rows_in_batch = 0;
-            }
-            statement.push_str(&encoded);
-            statement.push('\n');
-            rows_in_batch += 1;
         }
-
-        if rows_in_batch > 0 {
-            self.execute_sql(&statement).await?;
-        }
+        self.execute_binary_insert(&sql, body).await?;
 
         Ok(rows.len())
     }
@@ -434,6 +442,29 @@ impl ClickHousePublisher {
         }
         Ok(())
     }
+
+    async fn execute_binary_insert(&self, sql: &str, body: Vec<u8>) -> Result<()> {
+        let response = self
+            .client
+            .post(&self.config.url)
+            .basic_auth(&self.config.user, Some(&self.config.password))
+            .query(&[("query", sql)])
+            .body(body)
+            .send()
+            .await
+            .with_context(|| format!("sending clickhouse binary insert: {}", summarize_sql(sql)))?;
+        if response.status() != StatusCode::OK {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "clickhouse returned {} for `{}`: {}",
+                status,
+                summarize_sql(sql),
+                body
+            );
+        }
+        Ok(())
+    }
 }
 
 fn raw_plugin_table_name(source_id: &str, table_name: &str) -> String {
@@ -532,121 +563,270 @@ fn build_raw_plugin_row(
     Ok(output)
 }
 
-fn build_insert_row(
+fn raw_insert_column_list(schema: &ObservedSchema) -> String {
+    let mut columns = vec![
+        quote_ident("processed_at"),
+        quote_ident("artifact_id"),
+        quote_ident("source_id"),
+        quote_ident("collection_id"),
+        quote_ident("schema_hash"),
+        quote_ident("source_url"),
+        quote_ident("archive_entry"),
+        quote_ident("row_hash"),
+    ];
+    columns.extend(
+        schema
+            .columns
+            .iter()
+            .map(|column| quote_ident(&column.name)),
+    );
+    columns.join(", ")
+}
+
+fn encode_raw_row(
+    buffer: &mut Vec<u8>,
     schema: &ObservedSchema,
     source_id: &str,
     collection_id: &str,
     artifact_id: &str,
     remote_uri: &str,
-    processed_at: &str,
-    row: &Value,
-) -> Result<Map<String, Value>> {
-    let object = row
-        .as_object()
-        .ok_or_else(|| anyhow!("raw row payload must be an object"))?;
-    let mut output = Map::new();
-    output.insert(
-        "processed_at".to_string(),
-        Value::String(processed_at.to_string()),
-    );
-    output.insert(
-        "artifact_id".to_string(),
-        Value::String(artifact_id.to_string()),
-    );
-    output.insert(
-        "source_id".to_string(),
-        Value::String(source_id.to_string()),
-    );
-    output.insert(
-        "collection_id".to_string(),
-        Value::String(collection_id.to_string()),
-    );
-    output.insert(
-        "schema_hash".to_string(),
-        Value::String(schema.schema_key.header_hash.clone()),
-    );
-    output.insert(
-        "source_url".to_string(),
-        object
-            .get("_source_url")
-            .and_then(Value::as_str)
-            .map(|value| Value::String(value.to_string()))
-            .unwrap_or_else(|| Value::String(remote_uri.to_string())),
-    );
-    output.insert(
-        "archive_entry".to_string(),
-        object
-            .get("_archive_entry")
-            .and_then(Value::as_str)
-            .map(|value| Value::String(value.to_string()))
-            .unwrap_or_else(|| Value::String(String::new())),
-    );
-    output.insert(
-        "row_hash".to_string(),
-        Value::Number(serde_json::Number::from(row_hash_value(row)?)),
-    );
-    for column in &schema.columns {
-        let source_type = column
-            .source_data_type
-            .as_deref()
-            .unwrap_or("Nullable(String)");
-        let source_key = column.name.to_ascii_lowercase();
-        let value = object
-            .get(&column.name)
-            .or_else(|| object.get(&source_key))
-            .cloned()
-            .unwrap_or(Value::Null);
-        output.insert(
-            column.name.clone(),
-            coerce_value(value, source_type)
-                .with_context(|| format!("coercing column {}", column.name))?,
-        );
+    processed_at: DateTime<Utc>,
+    row: &StructuredRow,
+    column_types: &[ClickHouseType],
+) -> Result<()> {
+    encode_datetime64(buffer, processed_at, 3);
+    encode_string(buffer, artifact_id);
+    encode_string(buffer, source_id);
+    encode_string(buffer, collection_id);
+    encode_string(buffer, &schema.schema_key.header_hash);
+    encode_string(buffer, row.source_url.as_deref().unwrap_or(remote_uri));
+    encode_string(buffer, row.archive_entry.as_deref().unwrap_or(""));
+    buffer.extend_from_slice(&row_hash_value(row).to_le_bytes());
+
+    for (idx, column) in schema.columns.iter().enumerate() {
+        let value = row.values.get(idx).unwrap_or(&RawValue::Null);
+        let field_type = column_types
+            .get(idx)
+            .ok_or_else(|| anyhow!("missing parsed type for column {}", column.name))?;
+        encode_value(buffer, field_type, value)
+            .with_context(|| format!("encoding rowbinary column {}", column.name))?;
     }
-    Ok(output)
+
+    Ok(())
 }
 
-fn row_hash_value(row: &Value) -> Result<u64> {
-    let canonical = serde_json::to_vec(row)?;
-    let digest = Sha256::digest(canonical);
+fn row_hash_value(row: &StructuredRow) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update((row.values.len() as u64).to_le_bytes());
+    for value in &row.values {
+        hash_raw_value(&mut hasher, value);
+    }
+    let digest = hasher.finalize();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_le_bytes(bytes))
+    u64::from_le_bytes(bytes)
 }
 
-fn coerce_value(value: Value, source_type: &str) -> Result<Value> {
-    if value.is_null() {
-        return Ok(Value::Null);
-    }
-    if source_type.contains("String") {
-        return Ok(Value::String(stringify_value(&value)?));
-    }
-    if source_type.contains("Float") {
-        return match value {
-            Value::Number(_) => Ok(value),
-            Value::String(text) => {
-                let parsed = text
-                    .parse::<f64>()
-                    .with_context(|| format!("invalid float `{text}`"))?;
-                let number = serde_json::Number::from_f64(parsed)
-                    .ok_or_else(|| anyhow!("non-finite float `{text}`"))?;
-                Ok(Value::Number(number))
-            }
-            other => Err(anyhow!("cannot coerce {} to float", other)),
-        };
-    }
-    if source_type.contains("DateTime") || source_type == "Date" || source_type == "Nullable(Date)"
-    {
-        return Ok(Value::String(stringify_value(&value)?));
-    }
-    Ok(value)
-}
-
-fn stringify_value(value: &Value) -> Result<String> {
+fn hash_raw_value(hasher: &mut Sha256, value: &RawValue) {
     match value {
-        Value::String(text) => Ok(text.clone()),
-        Value::Number(number) => Ok(number.to_string()),
-        Value::Bool(boolean) => Ok(boolean.to_string()),
-        other => Err(anyhow!("cannot stringify {}", other)),
+        RawValue::Null => hasher.update([0]),
+        RawValue::String(text) => {
+            hasher.update([1]);
+            hasher.update((text.len() as u64).to_le_bytes());
+            hasher.update(text.as_bytes());
+        }
+        RawValue::Int64(number) => {
+            hasher.update([2]);
+            hasher.update(number.to_le_bytes());
+        }
+        RawValue::Float64(number) => {
+            hasher.update([3]);
+            hasher.update(number.to_bits().to_le_bytes());
+        }
+        RawValue::Date(date) => {
+            hasher.update([4]);
+            hasher.update(date.num_days_from_ce().to_le_bytes());
+        }
+        RawValue::DateTime(datetime) => {
+            hasher.update([5]);
+            hasher.update(datetime.timestamp_millis().to_le_bytes());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ClickHouseType {
+    Nullable(Box<ClickHouseType>),
+    String,
+    Float64,
+    Int64,
+    UInt64,
+    Date,
+    DateTime64(u32),
+}
+
+fn parse_clickhouse_type(value: &str) -> Result<ClickHouseType> {
+    let trimmed = value.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("Nullable(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return Ok(ClickHouseType::Nullable(Box::new(parse_clickhouse_type(
+            inner,
+        )?)));
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("LowCardinality(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return parse_clickhouse_type(inner);
+    }
+    if trimmed == "String" {
+        return Ok(ClickHouseType::String);
+    }
+    if trimmed == "Float64" {
+        return Ok(ClickHouseType::Float64);
+    }
+    if trimmed == "Int64" {
+        return Ok(ClickHouseType::Int64);
+    }
+    if trimmed == "UInt64" {
+        return Ok(ClickHouseType::UInt64);
+    }
+    if trimmed == "Date" {
+        return Ok(ClickHouseType::Date);
+    }
+    if let Some(scale) = parse_datetime64_scale(trimmed) {
+        return Ok(ClickHouseType::DateTime64(scale));
+    }
+    bail!("unsupported ClickHouse type `{trimmed}` for RowBinary encoding")
+}
+
+fn parse_datetime64_scale(value: &str) -> Option<u32> {
+    let inner = value.strip_prefix("DateTime64(")?.strip_suffix(')')?;
+    let scale = inner.split(',').next()?.trim();
+    scale.parse().ok()
+}
+
+fn encode_value(buffer: &mut Vec<u8>, field_type: &ClickHouseType, value: &RawValue) -> Result<()> {
+    match field_type {
+        ClickHouseType::Nullable(inner) => {
+            if matches!(value, RawValue::Null) {
+                buffer.push(1);
+                return Ok(());
+            }
+            buffer.push(0);
+            encode_value(buffer, inner, value)
+        }
+        ClickHouseType::String => {
+            let text = match value {
+                RawValue::Null => "",
+                RawValue::String(text) => text.as_str(),
+                RawValue::Int64(number) => return Ok(encode_string(buffer, &number.to_string())),
+                RawValue::Float64(number) => return Ok(encode_string(buffer, &number.to_string())),
+                RawValue::Date(date) => return Ok(encode_string(buffer, &date.to_string())),
+                RawValue::DateTime(datetime) => {
+                    return Ok(encode_string(buffer, &datetime.to_rfc3339()));
+                }
+            };
+            encode_string(buffer, text);
+            Ok(())
+        }
+        ClickHouseType::Float64 => {
+            let number = match value {
+                RawValue::Float64(number) => *number,
+                RawValue::Int64(number) => *number as f64,
+                RawValue::String(text) => text
+                    .parse()
+                    .with_context(|| format!("invalid float `{text}`"))?,
+                other => bail!("cannot encode {other:?} as Float64"),
+            };
+            buffer.extend_from_slice(&number.to_le_bytes());
+            Ok(())
+        }
+        ClickHouseType::Int64 => {
+            let number = match value {
+                RawValue::Int64(number) => *number,
+                RawValue::String(text) => text
+                    .parse()
+                    .with_context(|| format!("invalid int `{text}`"))?,
+                other => bail!("cannot encode {other:?} as Int64"),
+            };
+            buffer.extend_from_slice(&number.to_le_bytes());
+            Ok(())
+        }
+        ClickHouseType::UInt64 => {
+            let number = match value {
+                RawValue::Int64(number) if *number >= 0 => *number as u64,
+                RawValue::String(text) => text
+                    .parse()
+                    .with_context(|| format!("invalid uint `{text}`"))?,
+                other => bail!("cannot encode {other:?} as UInt64"),
+            };
+            buffer.extend_from_slice(&number.to_le_bytes());
+            Ok(())
+        }
+        ClickHouseType::Date => {
+            let date = match value {
+                RawValue::Date(date) => *date,
+                RawValue::String(text) => NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                    .with_context(|| format!("invalid date `{text}`"))?,
+                other => bail!("cannot encode {other:?} as Date"),
+            };
+            encode_date(buffer, date)?;
+            Ok(())
+        }
+        ClickHouseType::DateTime64(scale) => {
+            let datetime = match value {
+                RawValue::DateTime(datetime) => *datetime,
+                other => bail!("cannot encode {other:?} as DateTime64"),
+            };
+            encode_datetime64(buffer, datetime, *scale);
+            Ok(())
+        }
+    }
+}
+
+fn encode_date(buffer: &mut Vec<u8>, value: NaiveDate) -> Result<()> {
+    let origin = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let days = (value - origin).num_days();
+    let encoded = u16::try_from(days).with_context(|| format!("date out of range `{value}`"))?;
+    buffer.extend_from_slice(&encoded.to_le_bytes());
+    Ok(())
+}
+
+fn encode_datetime64(buffer: &mut Vec<u8>, value: DateTime<Utc>, scale: u32) {
+    let ticks = match scale {
+        0 => value.timestamp(),
+        3 => value.timestamp_millis(),
+        6 => value.timestamp_micros(),
+        9 => value
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| value.timestamp_micros() * 1_000),
+        other => {
+            let factor = 10_i64.pow(other);
+            value.timestamp().saturating_mul(factor)
+        }
+    };
+    buffer.extend_from_slice(&ticks.to_le_bytes());
+}
+
+fn encode_string(buffer: &mut Vec<u8>, value: &str) {
+    put_leb128(buffer, value.len() as u64);
+    buffer.extend_from_slice(value.as_bytes());
+}
+
+fn put_leb128(buffer: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        buffer.push(byte);
+        if value == 0 {
+            break;
+        }
     }
 }
 
@@ -694,6 +874,10 @@ pub fn sanitize_identifier(value: &str) -> String {
         sanitized.insert_str(0, "f_");
     }
     sanitized
+}
+
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn summarize_sql(sql: &str) -> String {

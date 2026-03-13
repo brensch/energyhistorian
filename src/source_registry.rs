@@ -70,24 +70,20 @@ impl SourceRegistry {
         self.sources
             .iter()
             .flat_map(|source| {
-                source
-                    .plan
-                    .collections
-                    .iter()
-                    .map(|collection| {
-                        let poll = collection.default_poll_interval_seconds.unwrap_or(300);
-                        ScheduleSeed {
-                            source_id: source.plan.descriptor.source_id.clone(),
-                            collection_id: collection.id.clone(),
-                            poll_interval_seconds: poll,
-                            stagger_offset_seconds: stable_stagger_offset(
-                                &source.plan.descriptor.source_id,
-                                &collection.id,
-                                poll,
-                            ),
-                            parser_version: source.parser_version.clone(),
-                        }
-                    })
+                source.plan.collections.iter().map(|collection| {
+                    let poll = collection.default_poll_interval_seconds.unwrap_or(300);
+                    ScheduleSeed {
+                        source_id: source.plan.descriptor.source_id.clone(),
+                        collection_id: collection.id.clone(),
+                        poll_interval_seconds: poll,
+                        stagger_offset_seconds: stable_stagger_offset(
+                            &source.plan.descriptor.source_id,
+                            &collection.id,
+                            poll,
+                        ),
+                        parser_version: source.parser_version.clone(),
+                    }
+                })
             })
             .collect()
     }
@@ -204,11 +200,7 @@ impl SourceRegistry {
     }
 }
 
-fn stable_stagger_offset(
-    source_id: &str,
-    collection_id: &str,
-    poll_interval_seconds: u64,
-) -> u64 {
+fn stable_stagger_offset(source_id: &str, collection_id: &str, poll_interval_seconds: u64) -> u64 {
     if poll_interval_seconds <= 1 {
         return 0;
     }

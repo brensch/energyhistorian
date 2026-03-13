@@ -1,4 +1,6 @@
-use chrono::{NaiveDate, NaiveDateTime};
+use crate::nem_time::{
+    looks_like_nem_date, looks_like_nem_datetime, parse_nem_date, parse_nem_datetime,
+};
 
 const MAX_ROWS_TO_SCAN_FOR_INFERENCE: usize = 10_000;
 
@@ -66,7 +68,7 @@ impl ColumnTypeInference {
                 if self.found_string[idx] {
                     "String".to_string()
                 } else if self.found_datetime[idx] {
-                    "Nullable(DateTime64(3))".to_string()
+                    "Nullable(DateTime64(3, 'UTC'))".to_string()
                 } else if self.found_date[idx] {
                     "Nullable(Date)".to_string()
                 } else if self.found_float[idx] {
@@ -84,49 +86,15 @@ fn infer_kind(value: &str) -> InferredKind {
         return InferredKind::Float;
     }
 
-    if looks_like_datetime(value) && parse_datetime(value).is_some() {
+    if looks_like_nem_datetime(value) && parse_nem_datetime(value).is_some() {
         return InferredKind::DateTime;
     }
 
-    if looks_like_date(value) && parse_date(value).is_some() {
+    if looks_like_nem_date(value) && parse_nem_date(value).is_some() {
         return InferredKind::Date;
     }
 
     InferredKind::String
-}
-
-fn looks_like_date(value: &str) -> bool {
-    value.len() == 10
-        && matches!(value.as_bytes().get(4), Some(b'-' | b'/'))
-        && matches!(value.as_bytes().get(7), Some(b'-' | b'/'))
-}
-
-fn looks_like_datetime(value: &str) -> bool {
-    value.len() >= 19
-        && matches!(value.as_bytes().get(4), Some(b'-' | b'/'))
-        && matches!(value.as_bytes().get(7), Some(b'-' | b'/'))
-        && matches!(value.as_bytes().get(10), Some(b' ' | b'T'))
-}
-
-fn parse_date(value: &str) -> Option<NaiveDate> {
-    ["%Y/%m/%d", "%Y-%m-%d"]
-        .iter()
-        .find_map(|fmt| NaiveDate::parse_from_str(value, fmt).ok())
-}
-
-fn parse_datetime(value: &str) -> Option<NaiveDateTime> {
-    [
-        "%Y/%m/%d %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y/%m/%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y/%m/%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y/%m/%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S%.f",
-    ]
-    .iter()
-    .find_map(|fmt| NaiveDateTime::parse_from_str(value, fmt).ok())
 }
 
 fn normalize_value(value: &str) -> &str {
@@ -145,7 +113,7 @@ mod tests {
         assert_eq!(
             inference.inferred_clickhouse_types(),
             vec![
-                "Nullable(DateTime64(3))",
+                "Nullable(DateTime64(3, 'UTC'))",
                 "Nullable(Date)",
                 "Nullable(Float64)",
                 "String",

@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use ingest_core::{ObservedSchema, RunContext};
+use ingest_core::{ObservedSchema, RunContext, StructuredRow};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::discover::discover_recent_archives;
 use crate::families::lookup_family;
@@ -142,7 +142,7 @@ impl TableAccumulator {
         }
     }
 
-    fn push(&mut self, logical_table_key: &str, rows: &[Value], schema_key: &str) {
+    fn push(&mut self, logical_table_key: &str, rows: &[StructuredRow], schema_key: &str) {
         if rows.is_empty() {
             self.batch_jsonl.push_str(
                 &json!({
@@ -158,7 +158,8 @@ impl TableAccumulator {
         }
 
         for payload in rows {
-            self.batch_jsonl.push_str(&payload.to_string());
+            self.batch_jsonl
+                .push_str(&serde_json::to_string(payload).unwrap_or_default());
             self.batch_jsonl.push('\n');
         }
         self.rows_written += rows.len();

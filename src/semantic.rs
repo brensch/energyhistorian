@@ -270,9 +270,15 @@ async fn build_union_view_sql(
                         .get(column_name)
                         .expect("preferred type exists for ordered column");
                     if column_types.contains_key(column_name.as_str()) {
-                        format!("CAST(`{column_name}`, '{target_type}') AS `{column_name}`")
+                        format!(
+                            "CAST(`{column_name}`, {}) AS `{column_name}`",
+                            sql_string_literal(target_type)
+                        )
                     } else {
-                        format!("CAST(NULL, '{target_type}') AS `{column_name}`")
+                        format!(
+                            "CAST(NULL, {}) AS `{column_name}`",
+                            sql_string_literal(target_type)
+                        )
                     }
                 })
                 .collect::<Vec<_>>()
@@ -362,6 +368,10 @@ fn qualified_name(database: &str, object_name: &str) -> String {
         sanitize_identifier(database),
         sanitize_identifier(object_name)
     )
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn parse_qualified_name(value: &str) -> Option<(String, String)> {

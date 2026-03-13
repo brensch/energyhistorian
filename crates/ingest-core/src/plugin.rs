@@ -5,11 +5,11 @@ use std::pin::Pin;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::artifact::{DiscoveredArtifact, LocalArtifact};
 use crate::promotion::PromotionMapping;
 use crate::raw_plugin::RawPluginParseResult;
+use crate::raw_value::StructuredRow;
 use crate::registry::SourceDescriptor;
 use crate::schema::ObservedSchema;
 use crate::semantic::SemanticJob;
@@ -122,7 +122,7 @@ pub struct RawTableChunk {
     #[serde(default)]
     pub row_count: usize,
     #[serde(default)]
-    pub rows: Vec<Value>,
+    pub rows: Vec<StructuredRow>,
 }
 
 impl RawTableChunk {
@@ -139,7 +139,7 @@ impl RawTableChunk {
 pub struct RawTableRow {
     pub logical_table_key: String,
     pub schema_key: String,
-    pub row: Value,
+    pub row: StructuredRow,
 }
 
 pub trait RawTableRowSink {
@@ -151,7 +151,7 @@ pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Default)]
 struct CollectingRawTableRowSink {
     order: Vec<(String, String)>,
-    rows_by_output: HashMap<(String, String), Vec<Value>>,
+    rows_by_output: HashMap<(String, String), Vec<StructuredRow>>,
 }
 
 impl CollectingRawTableRowSink {

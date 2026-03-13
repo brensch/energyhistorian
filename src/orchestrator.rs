@@ -87,9 +87,7 @@ pub async fn run_orchestrator(
         let data_dir = data_dir.clone();
         let stats = stats.clone();
         async move {
-            if let Err(e) =
-                download_loop(db, registry, http_client, sem, data_dir, stats).await
-            {
+            if let Err(e) = download_loop(db, registry, http_client, sem, data_dir, stats).await {
                 error!(error = %e, "download loop failed");
             }
         }
@@ -145,7 +143,7 @@ async fn recover_interrupted(db: &Db, data_dir: &Path) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT d.artifact_id, d.local_path FROM downloads d
          JOIN artifacts a ON a.artifact_id = d.artifact_id
-         WHERE a.status = 'downloaded'"
+         WHERE a.status = 'downloaded'",
     )?;
     let missing: Vec<String> = stmt
         .query_map([], |row| {
@@ -200,14 +198,8 @@ async fn discover_loop(
             let http_client = http_client.clone();
             let stats = stats.clone();
             handles.push(tokio::spawn(async move {
-                let result = run_discover(
-                    &db,
-                    &registry,
-                    &http_client,
-                    &source_id,
-                    &collection_id,
-                )
-                .await;
+                let result =
+                    run_discover(&db, &registry, &http_client, &source_id, &collection_id).await;
                 match &result {
                     Ok(count) => {
                         stats.discovers_ok.fetch_add(1, Ordering::Relaxed);
@@ -239,7 +231,7 @@ async fn find_due_schedules(db: &Db) -> Result<Vec<(String, String)>> {
     let now = now_iso();
     let mut stmt = conn.prepare(
         "SELECT source_id, collection_id FROM schedules
-         WHERE enabled = 1 AND next_discovery_at <= ?1"
+         WHERE enabled = 1 AND next_discovery_at <= ?1",
     )?;
     let rows = stmt
         .query_map(rusqlite::params![now], |row| {
@@ -404,7 +396,7 @@ async fn find_downloadable(db: &Db, limit: usize) -> Result<Vec<(String, String,
         "SELECT artifact_id, source_id, collection_id, metadata_json FROM artifacts
          WHERE status = 'discovered'
          ORDER BY discovered_at ASC
-         LIMIT ?1"
+         LIMIT ?1",
     )?;
     let rows = stmt
         .query_map(rusqlite::params![limit], |row| {
@@ -444,7 +436,13 @@ async fn run_download(
     tokio::fs::create_dir_all(&artifact_dir).await?;
 
     let local = registry
-        .fetch(http_client, source_id, collection_id, &discovered, &artifact_dir)
+        .fetch(
+            http_client,
+            source_id,
+            collection_id,
+            &discovered,
+            &artifact_dir,
+        )
         .await?;
 
     let local_path_str = local.local_path.display().to_string();
@@ -564,7 +562,7 @@ async fn find_parseable(
              WHERE p.artifact_id = a.artifact_id AND p.status = 'succeeded'
          )
          ORDER BY a.discovered_at ASC
-         LIMIT ?1"
+         LIMIT ?1",
     )?;
     let rows = stmt
         .query_map(rusqlite::params![limit], |row| {
@@ -646,8 +644,7 @@ async fn run_parse(
     };
 
     // Reconcile semantic views
-    let semantic_jobs =
-        reconcile_source_semantics(publisher, registry, source_id).await?;
+    let semantic_jobs = reconcile_source_semantics(publisher, registry, source_id).await?;
 
     // Record success
     let now = now_iso();
@@ -716,12 +713,7 @@ async fn publish_structured_raw_rows(
         let mut sink = ChannelRawTableRowSink { tx };
         registry2
             .stream_structured_parse(&source_id2, &artifact2, &collection_id2, &mut sink)
-            .with_context(|| {
-                format!(
-                    "streaming structured raw parsed rows for {}",
-                    source_id2
-                )
-            })
+            .with_context(|| format!("streaming structured raw parsed rows for {}", source_id2))
     });
 
     let mut batcher = ClickHouseRowBatcher::new(
@@ -756,7 +748,7 @@ impl RawTableRowSink for ChannelRawTableRowSink {
 struct PendingInsertChunk {
     logical_table_key: String,
     schema_key: String,
-    rows: Vec<serde_json::Value>,
+    rows: Vec<ingest_core::StructuredRow>,
     encoded_bytes: usize,
 }
 
@@ -796,7 +788,7 @@ impl<'a> ClickHouseRowBatcher<'a> {
     }
 
     async fn push(&mut self, row: RawTableRow) -> Result<()> {
-        let encoded_len = serde_json::to_string(&row.row)?.len() + 1;
+        let encoded_len = row.row.estimated_binary_size() + 96;
         let key = (row.logical_table_key.clone(), row.schema_key.clone());
         if let Some(existing) = self.pending.get(&key) {
             let would_exceed_rows = existing.rows.len() >= MAX_INSERT_ROWS;
