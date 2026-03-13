@@ -13,8 +13,8 @@ use ingest_core::{
     DiscoveredArtifact, DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities,
     PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
     SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
-    SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
-    semantic_model_registry_sql,
+    SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin, StructuredRawEventSink,
+    TaskBlueprint, TaskKind, semantic_model_registry_sql,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -694,10 +694,9 @@ impl RuntimeSourcePlugin for NemwebPlugin {
         &self,
         _collection_id: &str,
         artifact: LocalArtifact,
-        ctx: &RunContext,
+        _ctx: &RunContext,
     ) -> Result<RuntimePluginParseResult> {
-        let result = self.inspect_parse(&artifact, ctx)?;
-        Ok(RuntimePluginParseResult::StructuredRaw { artifact, result })
+        Ok(RuntimePluginParseResult::StructuredRaw { artifact })
     }
 
     fn stream_structured_parse_runtime(
@@ -708,5 +707,15 @@ impl RuntimeSourcePlugin for NemwebPlugin {
         sink: &mut dyn RawTableRowSink,
     ) -> Result<()> {
         self.stream_parse(artifact, ctx, sink)
+    }
+
+    fn stream_structured_parse_events_runtime(
+        &self,
+        artifact: &LocalArtifact,
+        _collection_id: &str,
+        _ctx: &RunContext,
+        sink: &mut dyn StructuredRawEventSink,
+    ) -> Result<()> {
+        parse::stream_local_archive_events(artifact, sink)
     }
 }

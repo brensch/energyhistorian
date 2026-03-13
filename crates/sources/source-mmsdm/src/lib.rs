@@ -8,8 +8,8 @@ use ingest_core::{
     DiscoveredArtifact, DiscoveryCursorHint, DiscoveryRequest, LocalArtifact, ParseResult,
     PluginCapabilities, PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult,
     RuntimeSourcePlugin, SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection,
-    SourceDescriptor, SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
-    semantic_model_registry_sql,
+    SourceDescriptor, SourceMetadataDocument, SourcePlugin, StructuredRawEventSink, TaskBlueprint,
+    TaskKind, semantic_model_registry_sql,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -562,8 +562,7 @@ impl RuntimeSourcePlugin for MmsdmPlugin {
         artifact: LocalArtifact,
         _ctx: &RunContext,
     ) -> Result<RuntimePluginParseResult> {
-        let result = self.parse_artifact(&artifact)?;
-        Ok(RuntimePluginParseResult::StructuredRaw { artifact, result })
+        Ok(RuntimePluginParseResult::StructuredRaw { artifact })
     }
 
     fn stream_structured_parse_runtime(
@@ -574,6 +573,16 @@ impl RuntimeSourcePlugin for MmsdmPlugin {
         sink: &mut dyn RawTableRowSink,
     ) -> Result<()> {
         self.stream_artifact(artifact, sink)
+    }
+
+    fn stream_structured_parse_events_runtime(
+        &self,
+        artifact: &LocalArtifact,
+        _collection_id: &str,
+        _ctx: &RunContext,
+        sink: &mut dyn StructuredRawEventSink,
+    ) -> Result<()> {
+        source_nemweb::parse::stream_local_archive_events(artifact, sink)
     }
 }
 

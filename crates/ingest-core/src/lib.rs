@@ -18,7 +18,8 @@ pub use plugin::{
     BoxedFuture, CollectionCompletion, CompletionUnit, DiscoveryCursorHint, DiscoveryRequest,
     ParseResult, PluginCapabilities, PromotionSpec, RawTableChunk, RawTableRow, RawTableRowSink,
     RunContext, RuntimePluginParseResult, RuntimeSourcePlugin, SourceCollection,
-    SourceMetadataDocument, SourcePlugin, TaskBlueprint, TaskKind,
+    SourceMetadataDocument, SourcePlugin, StructuredRawEvent, StructuredRawEventSink,
+    TaskBlueprint, TaskKind,
 };
 pub use promotion::{CanonicalDataset, PromotionMapping, PromotionMode};
 pub use raw_plugin::{RawPluginParseResult, RawPluginTableBatch};

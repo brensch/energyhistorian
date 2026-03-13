@@ -9,6 +9,7 @@ use chrono::Utc;
 use ingest_core::{
     DiscoveredArtifact, DiscoveryCursorHint, LocalArtifact, RunContext, RuntimePluginParseResult,
     RuntimeSourcePlugin, SemanticJob, SourceCollection, SourceDescriptor, SourceMetadataDocument,
+    StructuredRawEventSink,
 };
 use serde::Serialize;
 use source_aemo_dvd::AemoMetadataDvdPlugin;
@@ -132,18 +133,18 @@ impl SourceRegistry {
             .parse_artifact_runtime(collection_id, artifact, &ctx)
     }
 
-    pub fn stream_structured_parse(
+    pub fn stream_structured_parse_events(
         &self,
         source_id: &str,
         artifact: &LocalArtifact,
         collection_id: &str,
-        sink: &mut dyn ingest_core::RawTableRowSink,
+        sink: &mut dyn StructuredRawEventSink,
     ) -> Result<()> {
         let source = self.source(source_id)?;
         let ctx = self.run_context(source, "parse", collection_id);
         source
             .implementation
-            .stream_structured_parse_runtime(artifact, collection_id, &ctx, sink)
+            .stream_structured_parse_events_runtime(artifact, collection_id, &ctx, sink)
     }
 
     pub fn semantic_jobs(&self, source_id: &str) -> Result<Vec<SemanticJob>> {

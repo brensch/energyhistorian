@@ -10,7 +10,7 @@ use csv::StringRecord;
 use ingest_core::{
     ColumnTypeInference, LocalArtifact, LogicalTableId, ObservedSchema, ParseResult,
     PromotionMapping, RawTableChunk, RawTableRow, RawTableRowSink, RawValue, SchemaApprovalStatus,
-    SchemaColumn, SchemaVersionKey, StructuredRow,
+    SchemaColumn, SchemaVersionKey, StructuredRawEvent, StructuredRawEventSink, StructuredRow,
     nem_time::{parse_nem_date, parse_nem_datetime},
 };
 use sha2::{Digest, Sha256};
@@ -22,12 +22,32 @@ type RecordKey = (String, String, String);
 pub struct ArchiveParsePlan {
     pub observed_schemas: Vec<ObservedSchema>,
     pub raw_outputs: Vec<RawTableChunk>,
-    source_id: String,
     headers_by_key: HashMap<RecordKey, Vec<String>>,
     column_types_by_key: HashMap<RecordKey, Vec<String>>,
     schema_hash_by_key: HashMap<RecordKey, String>,
-    key_order: Vec<RecordKey>,
     csv_name: String,
+}
+
+struct TableState {
+    headers: Vec<String>,
+    inference: ColumnTypeInference,
+    buffered_records: Vec<StringRecord>,
+    inferred_types: Option<Vec<String>>,
+    schema_key: Option<String>,
+    row_count: usize,
+}
+
+impl TableState {
+    fn new(headers: Vec<String>) -> Self {
+        Self {
+            inference: ColumnTypeInference::new(headers.len()),
+            headers,
+            buffered_records: Vec::new(),
+            inferred_types: None,
+            schema_key: None,
+            row_count: 0,
+        }
+    }
 }
 
 pub fn inspect_local_archive(artifact: &LocalArtifact) -> Result<ArchiveParsePlan> {
@@ -127,24 +147,17 @@ pub fn inspect_local_archive(artifact: &LocalArtifact) -> Result<ArchiveParsePla
     Ok(ArchiveParsePlan {
         observed_schemas,
         raw_outputs,
-        source_id: artifact.metadata.source_id.clone(),
         headers_by_key,
         column_types_by_key,
         schema_hash_by_key,
-        key_order,
         csv_name,
     })
 }
 
 pub fn parse_local_archive(artifact: &LocalArtifact, _parsed_dir: &Path) -> Result<ParseResult> {
-    let plan = inspect_local_archive(artifact)?;
-    let mut sink = MaterializingRowSink::default();
-    stream_local_archive_rows(artifact, &plan, &mut sink)?;
-    Ok(ParseResult {
-        observed_schemas: plan.observed_schemas.clone(),
-        raw_outputs: sink.into_raw_outputs(&plan),
-        promotions: Vec::<PromotionMapping>::new(),
-    })
+    let mut sink = MaterializingEventSink::default();
+    stream_local_archive_events(artifact, &mut sink)?;
+    Ok(sink.into_parse_result())
 }
 
 pub fn stream_local_archive_rows(
@@ -204,6 +217,144 @@ pub fn stream_local_archive_rows(
                 &artifact.metadata.acquisition_uri,
             )?,
         })?;
+    }
+
+    Ok(())
+}
+
+pub fn stream_local_archive_events(
+    artifact: &LocalArtifact,
+    sink: &mut dyn StructuredRawEventSink,
+) -> Result<()> {
+    let file = File::open(&artifact.local_path)
+        .with_context(|| format!("opening {}", artifact.local_path.display()))?;
+    let mut zip = ZipArchive::new(BufReader::new(file))
+        .with_context(|| format!("opening ZIP archive {}", artifact.local_path.display()))?;
+    if zip.is_empty() {
+        bail!("archive {} is empty", artifact.local_path.display());
+    }
+
+    let entry = zip.by_index(0)?;
+    let csv_name = entry.name().to_string();
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(BufReader::new(entry));
+
+    let mut key_order = Vec::<RecordKey>::new();
+    let mut states = HashMap::<RecordKey, TableState>::new();
+    for row in reader.records() {
+        let record = row?;
+        if record.is_empty() {
+            continue;
+        }
+
+        match record.get(0) {
+            Some("I") => {
+                let Some(key) = record_key(&record) else {
+                    continue;
+                };
+                let headers = record
+                    .iter()
+                    .skip(4)
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>();
+                if !states.contains_key(&key) {
+                    key_order.push(key.clone());
+                }
+                states.insert(key, TableState::new(headers));
+            }
+            Some("D") => {
+                let Some(key) = record_key(&record) else {
+                    continue;
+                };
+                let state = states
+                    .get_mut(&key)
+                    .ok_or_else(|| anyhow!("data row before header for {:?}", key))?;
+                state.row_count += 1;
+
+                if let (Some(column_types), Some(schema_key)) =
+                    (state.inferred_types.as_deref(), state.schema_key.as_deref())
+                {
+                    sink.accept(StructuredRawEvent::Row(RawTableRow {
+                        logical_table_key: logical_table_key(
+                            &artifact.metadata.source_id,
+                            &key.0,
+                            &key.1,
+                            &key.2,
+                        ),
+                        schema_key: schema_key.to_string(),
+                        row: record_to_structured_row(
+                            &record,
+                            &state.headers,
+                            column_types,
+                            &csv_name,
+                            &artifact.metadata.acquisition_uri,
+                        )?,
+                    }))?;
+                    continue;
+                }
+
+                state.inference.update(record.iter().skip(4));
+                state.buffered_records.push(record.clone());
+                if state.inference.reached_scan_limit() {
+                    finalize_table_state(artifact, &key, &csv_name, state, sink)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for key in key_order {
+        let Some(state) = states.get_mut(&key) else {
+            continue;
+        };
+        finalize_table_state(artifact, &key, &csv_name, state, sink)?;
+    }
+
+    Ok(())
+}
+
+fn finalize_table_state(
+    artifact: &LocalArtifact,
+    key: &RecordKey,
+    csv_name: &str,
+    state: &mut TableState,
+    sink: &mut dyn StructuredRawEventSink,
+) -> Result<()> {
+    if state.inferred_types.is_none() {
+        let inferred_types = state.inference.inferred_clickhouse_types();
+        let schema = observed_schema_from_header(artifact, key, &state.headers, &inferred_types)?;
+        state.schema_key = Some(schema.schema_key.header_hash.clone());
+        state.inferred_types = Some(inferred_types);
+        sink.accept(StructuredRawEvent::Schema(schema))?;
+    }
+
+    let column_types = state
+        .inferred_types
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing inferred types for {:?}", key))?;
+    let schema_key = state
+        .schema_key
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing schema key for {:?}", key))?;
+    if state.buffered_records.is_empty() {
+        return Ok(());
+    }
+
+    let logical_table_key = logical_table_key(&artifact.metadata.source_id, &key.0, &key.1, &key.2);
+    for record in state.buffered_records.drain(..) {
+        sink.accept(StructuredRawEvent::Row(RawTableRow {
+            logical_table_key: logical_table_key.clone(),
+            schema_key: schema_key.to_string(),
+            row: record_to_structured_row(
+                &record,
+                &state.headers,
+                column_types,
+                csv_name,
+                &artifact.metadata.acquisition_uri,
+            )?,
+        }))?;
     }
 
     Ok(())
@@ -367,6 +518,35 @@ struct MaterializingRowSink {
     rows_by_output: HashMap<(String, String), Vec<StructuredRow>>,
 }
 
+#[derive(Default)]
+struct MaterializingEventSink {
+    observed_schemas: Vec<ObservedSchema>,
+    row_sink: MaterializingRowSink,
+}
+
+impl StructuredRawEventSink for MaterializingEventSink {
+    fn accept(&mut self, event: StructuredRawEvent) -> Result<()> {
+        match event {
+            StructuredRawEvent::Schema(schema) => {
+                self.observed_schemas.push(schema);
+                Ok(())
+            }
+            StructuredRawEvent::Row(row) => self.row_sink.accept(row),
+        }
+    }
+}
+
+impl MaterializingEventSink {
+    fn into_parse_result(self) -> ParseResult {
+        let raw_outputs = self.row_sink.into_raw_outputs_from_order();
+        ParseResult {
+            observed_schemas: self.observed_schemas,
+            raw_outputs,
+            promotions: Vec::<PromotionMapping>::new(),
+        }
+    }
+}
+
 impl RawTableRowSink for MaterializingRowSink {
     fn accept(&mut self, row: RawTableRow) -> Result<()> {
         let key = (row.logical_table_key, row.schema_key);
@@ -380,26 +560,19 @@ impl RawTableRowSink for MaterializingRowSink {
 }
 
 impl MaterializingRowSink {
-    fn into_raw_outputs(self, plan: &ArchiveParsePlan) -> Vec<RawTableChunk> {
+    fn into_raw_outputs_from_order(self) -> Vec<RawTableChunk> {
         let mut rows_by_output = self.rows_by_output;
-        let mut raw_outputs = Vec::new();
-
-        for key in &plan.key_order {
-            let logical_table_key = logical_table_key(&plan.source_id, &key.0, &key.1, &key.2);
-            let Some(schema_key) = plan.schema_hash_by_key.get(key).cloned() else {
-                continue;
-            };
-            let output_key = (logical_table_key.clone(), schema_key.clone());
-            if let Some(rows) = rows_by_output.remove(&output_key) {
-                raw_outputs.push(RawTableChunk {
+        self.order
+            .into_iter()
+            .filter_map(|(logical_table_key, schema_key)| {
+                let key = (logical_table_key.clone(), schema_key.clone());
+                rows_by_output.remove(&key).map(|rows| RawTableChunk {
                     logical_table_key,
                     schema_key,
                     row_count: rows.len(),
                     rows,
-                });
-            }
-        }
-
-        raw_outputs
+                })
+            })
+            .collect()
     }
 }

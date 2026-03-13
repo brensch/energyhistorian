@@ -79,6 +79,10 @@ impl ColumnTypeInference {
             })
             .collect()
     }
+
+    pub fn reached_scan_limit(&self) -> bool {
+        self.rows_scanned >= MAX_ROWS_TO_SCAN_FOR_INFERENCE
+    }
 }
 
 fn infer_kind(value: &str) -> InferredKind {

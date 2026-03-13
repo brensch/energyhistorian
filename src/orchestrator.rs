@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use ingest_core::{
-    ArtifactMetadata, DiscoveredArtifact, DiscoveryCursorHint, LocalArtifact, RawTableRow,
-    RawTableRowSink,
+    ArtifactMetadata, DiscoveredArtifact, DiscoveryCursorHint, LocalArtifact, ObservedSchema,
+    RawTableRow, StructuredRawEvent, StructuredRawEventSink,
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{error, info, warn};
@@ -618,33 +618,36 @@ async fn run_parse(
     };
 
     let parsed = registry.parse(source_id, collection_id, artifact.clone())?;
-    let rows_published = match parsed {
+    let (rows_published, semantic_jobs) = match parsed {
         ParsedArtifact::StructuredRaw {
             artifact: ref local_artifact,
-            ref result,
         } => {
-            publish_structured_raw_rows(
+            let publish = publish_structured_raw_rows(
                 publisher,
                 registry,
                 source_id,
                 collection_id,
                 local_artifact,
-                result,
             )
-            .await?
+            .await?;
+            let semantic_jobs = if publish.new_schemas_observed {
+                reconcile_source_semantics(publisher, registry, source_id).await?
+            } else {
+                0
+            };
+            (publish.rows_published, semantic_jobs)
         }
         ParsedArtifact::RawMetadata {
             artifact: ref local_artifact,
             ref result,
         } => {
-            publisher
+            let rows = publisher
                 .publish_raw_plugin_parse_result(source_id, collection_id, local_artifact, result)
-                .await?
+                .await?;
+            let semantic_jobs = reconcile_source_semantics(publisher, registry, source_id).await?;
+            (rows, semantic_jobs)
         }
     };
-
-    // Reconcile semantic views
-    let semantic_jobs = reconcile_source_semantics(publisher, registry, source_id).await?;
 
     // Record success
     let now = now_iso();
@@ -699,33 +702,35 @@ async fn publish_structured_raw_rows(
     source_id: &str,
     collection_id: &str,
     artifact: &LocalArtifact,
-    result: &ingest_core::ParseResult,
-) -> Result<usize> {
-    publisher
-        .ensure_tables(source_id, collection_id, &result.observed_schemas)
-        .await?;
-    let (tx, mut rx) = mpsc::channel::<RawTableRow>(64);
+) -> Result<StructuredPublishOutcome> {
+    let (tx, mut rx) = mpsc::channel::<StructuredRawEvent>(64);
     let artifact2 = artifact.clone();
     let collection_id2 = collection_id.to_string();
     let registry2 = registry.clone();
     let source_id2 = source_id.to_string();
     let parse_handle = tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut sink = ChannelRawTableRowSink { tx };
+        let mut sink = ChannelStructuredRawEventSink { tx };
         registry2
-            .stream_structured_parse(&source_id2, &artifact2, &collection_id2, &mut sink)
+            .stream_structured_parse_events(&source_id2, &artifact2, &collection_id2, &mut sink)
             .with_context(|| format!("streaming structured raw parsed rows for {}", source_id2))
     });
 
     let mut batcher = ClickHouseRowBatcher::new(
         publisher,
-        &result.observed_schemas,
         source_id,
         collection_id.to_string(),
         &artifact.metadata.artifact_id,
         &artifact.metadata.acquisition_uri,
     );
-    while let Some(row) = rx.recv().await {
-        batcher.push(row).await?;
+    while let Some(event) = rx.recv().await {
+        match event {
+            StructuredRawEvent::Schema(schema) => {
+                batcher.register_schema(schema).await?;
+            }
+            StructuredRawEvent::Row(row) => {
+                batcher.push(row).await?;
+            }
+        }
     }
     parse_handle
         .await
@@ -733,20 +738,24 @@ async fn publish_structured_raw_rows(
     batcher.finish().await
 }
 
-struct ChannelRawTableRowSink {
-    tx: mpsc::Sender<RawTableRow>,
+struct ChannelStructuredRawEventSink {
+    tx: mpsc::Sender<StructuredRawEvent>,
 }
 
-impl RawTableRowSink for ChannelRawTableRowSink {
-    fn accept(&mut self, row: RawTableRow) -> Result<()> {
+impl StructuredRawEventSink for ChannelStructuredRawEventSink {
+    fn accept(&mut self, event: StructuredRawEvent) -> Result<()> {
         self.tx
-            .blocking_send(row)
-            .map_err(|_| anyhow!("row stream channel closed while parsing"))
+            .blocking_send(event)
+            .map_err(|_| anyhow!("structured raw stream channel closed while parsing"))
     }
 }
 
+struct StructuredPublishOutcome {
+    rows_published: usize,
+    new_schemas_observed: bool,
+}
+
 struct PendingInsertChunk {
-    logical_table_key: String,
     schema_key: String,
     rows: Vec<ingest_core::StructuredRow>,
     encoded_bytes: usize,
@@ -761,12 +770,12 @@ struct ClickHouseRowBatcher<'a> {
     remote_uri: &'a str,
     pending: std::collections::HashMap<(String, String), PendingInsertChunk>,
     published_rows: usize,
+    new_schemas_observed: bool,
 }
 
 impl<'a> ClickHouseRowBatcher<'a> {
     fn new(
         publisher: &'a ClickHousePublisher,
-        schemas: &[ingest_core::ObservedSchema],
         source_id: &'a str,
         collection_id: String,
         artifact_id: &'a str,
@@ -774,20 +783,40 @@ impl<'a> ClickHouseRowBatcher<'a> {
     ) -> Self {
         Self {
             publisher,
-            schemas_by_hash: schemas
-                .iter()
-                .map(|schema| (schema.schema_key.header_hash.clone(), schema.clone()))
-                .collect(),
+            schemas_by_hash: std::collections::HashMap::new(),
             source_id,
             collection_id,
             artifact_id,
             remote_uri,
             pending: std::collections::HashMap::new(),
             published_rows: 0,
+            new_schemas_observed: false,
         }
     }
 
+    async fn register_schema(&mut self, schema: ObservedSchema) -> Result<()> {
+        let schema_hash = schema.schema_key.header_hash.clone();
+        if self.schemas_by_hash.contains_key(&schema_hash) {
+            return Ok(());
+        }
+        if self
+            .publisher
+            .ensure_table(self.source_id, &self.collection_id, &schema)
+            .await?
+        {
+            self.new_schemas_observed = true;
+        }
+        self.schemas_by_hash.insert(schema_hash, schema);
+        Ok(())
+    }
+
     async fn push(&mut self, row: RawTableRow) -> Result<()> {
+        if !self.schemas_by_hash.contains_key(&row.schema_key) {
+            return Err(anyhow!(
+                "row arrived before schema registration for {}",
+                row.schema_key
+            ));
+        }
         let encoded_len = row.row.estimated_binary_size() + 96;
         let key = (row.logical_table_key.clone(), row.schema_key.clone());
         if let Some(existing) = self.pending.get(&key) {
@@ -803,7 +832,6 @@ impl<'a> ClickHouseRowBatcher<'a> {
             .pending
             .entry(key.clone())
             .or_insert_with(|| PendingInsertChunk {
-                logical_table_key: row.logical_table_key.clone(),
                 schema_key: row.schema_key.clone(),
                 rows: Vec::new(),
                 encoded_bytes: 0,
@@ -813,12 +841,15 @@ impl<'a> ClickHouseRowBatcher<'a> {
         Ok(())
     }
 
-    async fn finish(mut self) -> Result<usize> {
+    async fn finish(mut self) -> Result<StructuredPublishOutcome> {
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
             self.flush_key(&key).await?;
         }
-        Ok(self.published_rows)
+        Ok(StructuredPublishOutcome {
+            rows_published: self.published_rows,
+            new_schemas_observed: self.new_schemas_observed,
+        })
     }
 
     async fn flush_key(&mut self, key: &(String, String)) -> Result<()> {
@@ -834,21 +865,14 @@ impl<'a> ClickHouseRowBatcher<'a> {
             .ok_or_else(|| anyhow!("missing schema for {}", chunk.schema_key))?;
         self.published_rows += self
             .publisher
-            .publish_parse_result(
+            .publish_prepared_raw_chunk(
+                schema,
                 self.source_id,
                 &self.collection_id,
                 self.artifact_id,
                 self.remote_uri,
-                &ingest_core::ParseResult {
-                    observed_schemas: vec![schema.clone()],
-                    raw_outputs: vec![ingest_core::RawTableChunk {
-                        logical_table_key: chunk.logical_table_key,
-                        schema_key: chunk.schema_key,
-                        row_count: chunk.rows.len(),
-                        rows: chunk.rows,
-                    }],
-                    promotions: Vec::new(),
-                },
+                Utc::now(),
+                &chunk.rows,
             )
             .await?;
         Ok(())

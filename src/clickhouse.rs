@@ -1,13 +1,17 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use ingest_core::{
-    LocalArtifact, ObservedSchema, ParseResult, RawPluginParseResult, RawValue, StructuredRow,
+    LocalArtifact, ObservedSchema, RawPluginParseResult, RawValue, StructuredRow,
     plan_raw_table_in_database,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 pub const MAX_INSERT_ROWS: usize = 10_000;
 pub const MAX_INSERT_BYTES: usize = 8 * 1024 * 1024;
@@ -23,6 +27,20 @@ pub struct ClickHouseConfig {
 pub struct ClickHousePublisher {
     client: reqwest::Client,
     config: ClickHouseConfig,
+    initialized_databases: Arc<Mutex<HashSet<String>>>,
+    known_raw_tables: Arc<Mutex<HashSet<(String, String)>>>,
+    known_schemas: Arc<Mutex<HashMap<String, HashSet<(String, String)>>>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnsureTablesOutcome {
+    pub new_schemas: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RegisteredSchemaRow {
+    physical_table: String,
+    schema_hash: String,
 }
 
 impl ClickHousePublisher {
@@ -31,55 +49,18 @@ impl ClickHousePublisher {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .context("building clickhouse HTTP client")?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            initialized_databases: Arc::new(Mutex::new(HashSet::new())),
+            known_raw_tables: Arc::new(Mutex::new(HashSet::new())),
+            known_schemas: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     pub async fn ensure_ready(&self) -> Result<()> {
         self.execute_sql("SELECT 1").await?;
         Ok(())
-    }
-
-    pub async fn publish_parse_result(
-        &self,
-        source_id: &str,
-        collection_id: &str,
-        artifact_id: &str,
-        remote_uri: &str,
-        result: &ParseResult,
-    ) -> Result<usize> {
-        let schemas_by_hash = result
-            .observed_schemas
-            .iter()
-            .map(|schema| (schema.schema_key.header_hash.clone(), schema))
-            .collect::<std::collections::HashMap<_, _>>();
-
-        self.ensure_tables(source_id, collection_id, &result.observed_schemas)
-            .await?;
-
-        let processed_at = Utc::now();
-        let mut rows_written = 0usize;
-        for chunk in &result.raw_outputs {
-            let schema = schemas_by_hash
-                .get(&chunk.schema_key)
-                .copied()
-                .ok_or_else(|| anyhow!("missing schema for chunk {}", chunk.schema_key))?;
-            if chunk.rows.is_empty() {
-                continue;
-            }
-            rows_written += self
-                .publish_raw_chunk(
-                    schema,
-                    source_id,
-                    collection_id,
-                    artifact_id,
-                    remote_uri,
-                    processed_at,
-                    &chunk.rows,
-                )
-                .await?;
-        }
-
-        Ok(rows_written)
     }
 
     pub async fn publish_raw_plugin_parse_result(
@@ -116,31 +97,167 @@ impl ClickHousePublisher {
         source_id: &str,
         collection_id: &str,
         schemas: &[ObservedSchema],
-    ) -> Result<()> {
+    ) -> Result<EnsureTablesOutcome> {
         let database = raw_database_name(source_id);
-        self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
-            .await?;
-        self.ensure_observed_schema_tables(&database).await?;
+        self.ensure_database_initialized(&database).await?;
+        self.ensure_known_schemas_loaded(&database).await?;
+        let mut outcome = EnsureTablesOutcome::default();
         for schema in schemas {
             let plan = plan_raw_table_in_database(&database, schema);
-            for statement in plan
-                .create_sql
+            self.ensure_raw_table(&database, &plan.table_name, &plan.create_sql)
+                .await?;
+            if self
+                .record_observed_schema_if_new(
+                    &database,
+                    source_id,
+                    collection_id,
+                    &plan.table_name,
+                    schema,
+                )
+                .await?
+            {
+                outcome.new_schemas += 1;
+            }
+        }
+        Ok(outcome)
+    }
+
+    pub async fn ensure_table(
+        &self,
+        source_id: &str,
+        collection_id: &str,
+        schema: &ObservedSchema,
+    ) -> Result<bool> {
+        let outcome = self
+            .ensure_tables(source_id, collection_id, std::slice::from_ref(schema))
+            .await?;
+        Ok(outcome.new_schemas > 0)
+    }
+
+    pub async fn publish_prepared_raw_chunk(
+        &self,
+        schema: &ObservedSchema,
+        source_id: &str,
+        collection_id: &str,
+        artifact_id: &str,
+        remote_uri: &str,
+        processed_at: DateTime<Utc>,
+        rows: &[StructuredRow],
+    ) -> Result<usize> {
+        self.publish_raw_chunk(
+            schema,
+            source_id,
+            collection_id,
+            artifact_id,
+            remote_uri,
+            processed_at,
+            rows,
+        )
+        .await
+    }
+
+    async fn ensure_database_initialized(&self, database: &str) -> Result<()> {
+        {
+            let mut initialized = self.initialized_databases.lock().await;
+            if !initialized.insert(database.to_string()) {
+                return Ok(());
+            }
+        }
+        if let Err(error) = async {
+            self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
+                .await?;
+            self.ensure_observed_schema_tables(database).await
+        }
+        .await
+        {
+            let mut initialized = self.initialized_databases.lock().await;
+            initialized.remove(database);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn ensure_raw_table(
+        &self,
+        database: &str,
+        table_name: &str,
+        create_sql: &str,
+    ) -> Result<()> {
+        let cache_key = (database.to_string(), table_name.to_string());
+        {
+            let mut known_tables = self.known_raw_tables.lock().await;
+            if !known_tables.insert(cache_key.clone()) {
+                return Ok(());
+            }
+        }
+        if let Err(error) = async {
+            for statement in create_sql
                 .split(';')
                 .map(str::trim)
                 .filter(|statement| !statement.is_empty())
             {
                 self.execute_sql(statement).await?;
             }
-            self.record_observed_schema(
-                &database,
-                source_id,
-                collection_id,
-                &plan.table_name,
-                schema,
-            )
-            .await?;
+            Ok(())
+        }
+        .await
+        {
+            let mut known_tables = self.known_raw_tables.lock().await;
+            known_tables.remove(&cache_key);
+            return Err(error);
         }
         Ok(())
+    }
+
+    async fn ensure_known_schemas_loaded(&self, database: &str) -> Result<()> {
+        {
+            let known_schemas = self.known_schemas.lock().await;
+            if known_schemas.contains_key(database) {
+                return Ok(());
+            }
+        }
+        let rows = self
+            .query_json_rows::<RegisteredSchemaRow>(&format!(
+                "SELECT DISTINCT physical_table, schema_hash FROM {database}.observed_schemas"
+            ))
+            .await?;
+        let loaded = rows
+            .into_iter()
+            .map(|row| (row.physical_table, row.schema_hash))
+            .collect::<HashSet<_>>();
+        let mut known_schemas = self.known_schemas.lock().await;
+        known_schemas.entry(database.to_string()).or_insert(loaded);
+        Ok(())
+    }
+
+    async fn record_observed_schema_if_new(
+        &self,
+        database: &str,
+        source_id: &str,
+        collection_id: &str,
+        physical_table: &str,
+        schema: &ObservedSchema,
+    ) -> Result<bool> {
+        let schema_hash = schema.schema_key.header_hash.clone();
+        let cache_key = (physical_table.to_string(), schema_hash.clone());
+        {
+            let mut known_schemas = self.known_schemas.lock().await;
+            let entry = known_schemas.entry(database.to_string()).or_default();
+            if !entry.insert(cache_key.clone()) {
+                return Ok(false);
+            }
+        }
+        if let Err(error) = self
+            .record_observed_schema(&database, source_id, collection_id, physical_table, schema)
+            .await
+        {
+            let mut known_schemas = self.known_schemas.lock().await;
+            if let Some(entry) = known_schemas.get_mut(database) {
+                entry.remove(&cache_key);
+            }
+            return Err(error);
+        }
+        Ok(true)
     }
 
     async fn publish_raw_chunk(

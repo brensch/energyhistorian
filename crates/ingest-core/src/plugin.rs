@@ -142,8 +142,28 @@ pub struct RawTableRow {
     pub row: StructuredRow,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StructuredRawEvent {
+    Schema(ObservedSchema),
+    Row(RawTableRow),
+}
+
 pub trait RawTableRowSink {
     fn accept(&mut self, row: RawTableRow) -> Result<()>;
+}
+
+pub trait StructuredRawEventSink {
+    fn accept(&mut self, event: StructuredRawEvent) -> Result<()>;
+}
+
+struct EventToRowSinkAdapter<'a> {
+    sink: &'a mut dyn StructuredRawEventSink,
+}
+
+impl RawTableRowSink for EventToRowSinkAdapter<'_> {
+    fn accept(&mut self, row: RawTableRow) -> Result<()> {
+        self.sink.accept(StructuredRawEvent::Row(row))
+    }
 }
 
 pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -237,7 +257,6 @@ pub trait SourcePlugin {
 pub enum RuntimePluginParseResult {
     StructuredRaw {
         artifact: LocalArtifact,
-        result: ParseResult,
     },
     RawMetadata {
         artifact: LocalArtifact,
@@ -279,4 +298,19 @@ pub trait RuntimeSourcePlugin: SourcePlugin + Send + Sync {
         ctx: &RunContext,
         sink: &mut dyn RawTableRowSink,
     ) -> Result<()>;
+
+    fn stream_structured_parse_events_runtime(
+        &self,
+        artifact: &LocalArtifact,
+        collection_id: &str,
+        ctx: &RunContext,
+        sink: &mut dyn StructuredRawEventSink,
+    ) -> Result<()> {
+        let inspected = self.inspect_parse(artifact, ctx)?;
+        for schema in inspected.observed_schemas {
+            sink.accept(StructuredRawEvent::Schema(schema))?;
+        }
+        let mut row_sink = EventToRowSinkAdapter { sink };
+        self.stream_structured_parse_runtime(artifact, collection_id, ctx, &mut row_sink)
+    }
 }
