@@ -748,7 +748,7 @@ fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
     if let Some(idx) = datetime_idx {
         let x = preview.columns[idx].clone();
         let y = numeric.into_iter().take(2).collect::<Vec<_>>();
-        return build_vega_lite_chart(
+        return build_plotly_chart(
             preview,
             title,
             "line",
@@ -763,7 +763,7 @@ fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
         let primary = choose_primary_category(&categorical);
         let color = choose_color_category(preview, &categorical, Some(&primary));
         let horizontal = should_use_horizontal_ranking(preview, &primary);
-        return build_vega_lite_chart(
+        return build_plotly_chart(
             preview,
             title,
             "bar",
@@ -782,62 +782,20 @@ fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
 fn validate_chart_spec(chart: &ChartSpec, preview: &QueryPreview) -> Result<()> {
     match chart {
         ChartSpec::Summary { .. } | ChartSpec::Table { .. } => Ok(()),
-        ChartSpec::VegaLite { spec, .. } => {
-            let mut fields = Vec::new();
-            collect_chart_fields(spec, &mut fields)?;
-            let allowed = preview
-                .columns
-                .iter()
-                .cloned()
-                .chain(["value".to_string(), "series".to_string()])
-                .collect::<HashSet<_>>();
-            let invalid = fields
-                .into_iter()
-                .filter(|field| !allowed.contains(field))
-                .collect::<Vec<_>>();
-            if !invalid.is_empty() {
-                bail!("chart referenced unknown fields: {}", invalid.join(", "));
+        ChartSpec::Plotly { figure, .. } => {
+            let Some(data) = figure.get("data").and_then(Value::as_array) else {
+                bail!("plotly figure must contain a data array");
+            };
+            if data.is_empty() {
+                bail!("plotly figure data array cannot be empty");
             }
+            let _ = preview;
             Ok(())
         }
     }
 }
 
-fn collect_chart_fields(value: &Value, fields: &mut Vec<String>) -> Result<()> {
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                if key == "field" {
-                    if let Some(field) = child.as_str() {
-                        fields.push(field.to_string());
-                    }
-                } else if key == "fold" {
-                    let Some(items) = child.as_array() else {
-                        bail!("chart transform.fold must be an array");
-                    };
-                    for item in items {
-                        let Some(field) = item.as_str() else {
-                            bail!("chart transform.fold entries must be strings");
-                        };
-                        fields.push(field.to_string());
-                    }
-                } else {
-                    collect_chart_fields(child, fields)?;
-                }
-            }
-            Ok(())
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_chart_fields(item, fields)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn build_vega_lite_chart(
+fn build_plotly_chart(
     preview: &QueryPreview,
     title: &str,
     mark_type: &str,
@@ -847,7 +805,7 @@ fn build_vega_lite_chart(
     stacked: bool,
     horizontal: bool,
 ) -> ChartSpec {
-    let spec = build_vega_lite_spec(
+    let figure = build_plotly_figure(
         preview,
         title,
         mark_type,
@@ -857,13 +815,13 @@ fn build_vega_lite_chart(
         stacked,
         horizontal,
     );
-    ChartSpec::VegaLite {
+    ChartSpec::Plotly {
         title: title.to_string(),
-        spec,
+        figure,
     }
 }
 
-fn build_vega_lite_spec(
+fn build_plotly_figure(
     preview: &QueryPreview,
     title: &str,
     mark_type: &str,
@@ -873,141 +831,107 @@ fn build_vega_lite_spec(
     stacked: bool,
     horizontal: bool,
 ) -> Value {
-    let mut encoding = serde_json::Map::new();
-
-    let mut transforms = Vec::new();
-    let y_field = if y.len() > 1 {
-        transforms.push(json!({
-            "fold": y,
-            "as": ["series", "value"]
-        }));
-        "value".to_string()
-    } else {
-        y.first().cloned().unwrap_or_else(|| "value".to_string())
-    };
-    let y_title = if y.len() > 1 {
-        "Value".to_string()
-    } else {
-        axis_title_for_column(preview, &y_field)
-    };
-    if horizontal {
-        encoding.insert(
-            "x".to_string(),
-            json!({
-                "field": y_field,
-                "type": "quantitative",
-                "title": y_title,
-                "stack": if mark_type == "bar" && stacked { json!("zero") } else { Value::Null },
-            }),
-        );
-        encoding.insert(
-            "y".to_string(),
-            json!({
-                "field": x,
-                "type": vega_field_type(preview, x),
-                "title": axis_title_for_column(preview, x),
-                "sort": { "field": y_field, "order": "descending" },
-            }),
-        );
-    } else {
-        encoding.insert(
-            "x".to_string(),
-            json!({
-                "field": x,
-                "type": vega_field_type(preview, x),
-                "title": axis_title_for_column(preview, x),
-            }),
-        );
-        encoding.insert(
-            "y".to_string(),
-            json!({
-                "field": y_field,
-                "type": "quantitative",
-                "title": y_title,
-                "stack": if mark_type == "bar" && stacked { json!("zero") } else { Value::Null },
-            }),
-        );
-    }
-
+    let palette = [
+        "#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#f87171", "#22d3ee", "#84cc16",
+    ];
+    let rows = preview_rows_as_objects(preview);
     let color_field = if y.len() > 1 {
         Some("series".to_string())
     } else {
-        color.map(|value| value.to_string())
+        color.map(str::to_string)
     };
-    if let Some(field) = color_field {
-        let title = prettify_column(&field);
-        encoding.insert(
-            "color".to_string(),
-            json!({
-                "field": field,
-                "type": "nominal",
-                "title": title,
-                "scale": {
-                    "range": ["#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#f87171", "#22d3ee", "#84cc16"]
-                }
-            }),
-        );
-    }
-    encoding.insert(
-        "tooltip".to_string(),
-        json!(
-            preview
-                .columns
-                .iter()
-                .map(|column| {
-                    json!({
-                        "field": column,
-                        "type": vega_field_type(preview, column),
-                        "title": axis_title_for_column(preview, column),
-                    })
-                })
-                .collect::<Vec<_>>()
-        ),
-    );
 
-    let mark = if mark_type == "line" {
-        json!({ "type": "line", "point": true, "strokeWidth": 2.5 })
+    let traces = if y.len() > 1 {
+        y.iter()
+            .enumerate()
+            .map(|(index, y_field)| {
+                let x_values = rows.iter().map(|row| row.get(x).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+                let y_values = rows.iter().map(|row| row.get(y_field).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+                base_plotly_trace(
+                    mark_type,
+                    horizontal,
+                    &x_values,
+                    &y_values,
+                    &prettify_column(y_field),
+                    palette[index % palette.len()],
+                    preview.columns.iter().map(|column| row_column_values(&rows, column)).collect::<Vec<_>>(),
+                    &preview.columns,
+                )
+            })
+            .collect::<Vec<_>>()
+    } else if let Some(color_field) = color_field {
+        let groups = group_rows_by(&rows, &color_field);
+        groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, (group, group_rows))| {
+                let x_values = group_rows.iter().map(|row| row.get(x).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+                let y_values = group_rows
+                    .iter()
+                    .map(|row| row.get(&y[0]).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                base_plotly_trace(
+                    mark_type,
+                    horizontal,
+                    &x_values,
+                    &y_values,
+                    &group,
+                    palette[index % palette.len()],
+                    preview.columns.iter().map(|column| row_column_values(&group_rows, column)).collect::<Vec<_>>(),
+                    &preview.columns,
+                )
+            })
+            .collect::<Vec<_>>()
     } else {
-        json!({ "type": mark_type, "cornerRadiusTopLeft": 2, "cornerRadiusTopRight": 2 })
+        let x_values = rows.iter().map(|row| row.get(x).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+        let y_values = rows
+            .iter()
+            .map(|row| row.get(&y[0]).cloned().unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+        vec![base_plotly_trace(
+            mark_type,
+            horizontal,
+            &x_values,
+            &y_values,
+            &prettify_column(&y[0]),
+            palette[0],
+            preview.columns.iter().map(|column| row_column_values(&rows, column)).collect::<Vec<_>>(),
+            &preview.columns,
+        )]
     };
 
-    let mut spec = serde_json::Map::new();
-    spec.insert(
-        "$schema".to_string(),
-        json!("https://vega.github.io/schema/vega-lite/v6.json"),
-    );
-    spec.insert("title".to_string(), json!(title));
-    spec.insert("mark".to_string(), mark);
-    spec.insert("encoding".to_string(), Value::Object(encoding));
-    spec.insert("width".to_string(), json!("container"));
-    spec.insert("height".to_string(), json!(320));
-    spec.insert(
-        "config".to_string(),
-        json!({
-            "background": "transparent",
-            "view": { "stroke": null },
-            "axis": {
-                "labelColor": "#a3a3a3",
-                "titleColor": "#a3a3a3",
-                "gridColor": "rgba(64,64,64,0.45)",
-                "domainColor": "rgba(82,82,82,0.7)"
+    json!({
+        "data": traces,
+        "layout": {
+            "title": { "text": title, "x": 0.02, "font": { "family": "Space Grotesk, sans-serif", "color": "#f5f5f5", "size": 16 } },
+            "paper_bgcolor": "rgba(0,0,0,0)",
+            "plot_bgcolor": "rgba(0,0,0,0)",
+            "font": { "family": "Space Grotesk, sans-serif", "color": "#d4d4d4" },
+            "height": 360,
+            "margin": { "t": 56, "r": 24, "b": 44, "l": if horizontal { 140 } else { 52 } },
+            "legend": { "orientation": "h", "x": 0, "y": 1.12, "font": { "color": "#a3a3a3" } },
+            "barmode": if stacked { "stack" } else { "group" },
+            "xaxis": {
+                "title": { "text": if horizontal { axis_title_for_column(preview, &y[0]) } else { axis_title_for_column(preview, x) }, "font": { "color": "#a3a3a3", "size": 12 } },
+                "gridcolor": "rgba(64,64,64,0.45)",
+                "zerolinecolor": "rgba(64,64,64,0.45)",
+                "linecolor": "rgba(82,82,82,0.7)",
+                "automargin": true
             },
-            "legend": {
-                "labelColor": "#a3a3a3",
-                "titleColor": "#a3a3a3"
-            },
-            "title": {
-                "color": "#f5f5f5",
-                "font": "Space Grotesk, sans-serif",
-                "anchor": "start",
-                "fontSize": 16
+            "yaxis": {
+                "title": { "text": if horizontal { axis_title_for_column(preview, x) } else { axis_title_for_column(preview, &y[0]) }, "font": { "color": "#a3a3a3", "size": 12 } },
+                "gridcolor": "rgba(64,64,64,0.45)",
+                "zerolinecolor": "rgba(64,64,64,0.45)",
+                "linecolor": "rgba(82,82,82,0.7)",
+                "automargin": true
             }
-        }),
-    );
-    if !transforms.is_empty() {
-        spec.insert("transform".to_string(), Value::Array(transforms));
-    }
-    Value::Object(spec)
+        },
+        "config": {
+            "responsive": true,
+            "displaylogo": false,
+            "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+        }
+    })
 }
 
 fn compact_thread_context(messages: &[ThreadContextMessage]) -> Value {
@@ -1095,35 +1019,10 @@ fn extract_preview_and_chart(message: &ThreadContextMessage) -> Option<(QueryPre
 
 fn restyle_chart_as_stacked_bar(preview: &QueryPreview, chart: ChartSpec) -> Option<ChartSpec> {
     match chart {
-        ChartSpec::VegaLite { title, mut spec } => {
-            let x = vega_encoding_field(&spec, "x").or_else(|| infer_chart_x(preview))?;
-            let y = vega_encoding_field(&spec, "y")
-                .map(|field| vec![field])
-                .or_else(|| {
-                    let inferred = infer_chart_y(preview);
-                    if inferred.is_empty() {
-                        None
-                    } else {
-                        Some(inferred)
-                    }
-                })?;
-            let color =
-                vega_encoding_field(&spec, "color").or_else(|| infer_chart_color(preview, &x, &y));
-            spec = build_vega_lite_spec(
-                preview,
-                &format!("{title} (Stacked)"),
-                "bar",
-                &x,
-                &y,
-                color.as_deref(),
-                true,
-                false,
-            );
-            Some(ChartSpec::VegaLite {
-                title: format!("{title} (Stacked)"),
-                spec,
-            })
-        }
+        ChartSpec::Plotly { title, figure } => Some(ChartSpec::Plotly {
+            title: format!("{title} (Stacked)"),
+            figure: restyle_plotly_figure_as_stacked_bar(figure, &format!("{title} (Stacked)")),
+        }),
         ChartSpec::Summary { title } | ChartSpec::Table { title } => {
             let x = infer_chart_x(preview)?;
             let y = infer_chart_y(preview);
@@ -1131,7 +1030,7 @@ fn restyle_chart_as_stacked_bar(preview: &QueryPreview, chart: ChartSpec) -> Opt
                 return None;
             }
             let color = infer_chart_color(preview, &x, &y);
-            Some(build_vega_lite_chart(
+            Some(build_plotly_chart(
                 preview,
                 &format!("{title} (Stacked)"),
                 "bar",
@@ -1145,19 +1044,11 @@ fn restyle_chart_as_stacked_bar(preview: &QueryPreview, chart: ChartSpec) -> Opt
     }
 }
 
-fn vega_encoding_field(spec: &Value, channel: &str) -> Option<String> {
-    spec.get("encoding")?
-        .get(channel)?
-        .get("field")?
-        .as_str()
-        .map(str::to_string)
-}
-
 fn chart_title(chart: &ChartSpec) -> &str {
     match chart {
         ChartSpec::Summary { title }
         | ChartSpec::Table { title }
-        | ChartSpec::VegaLite { title, .. } => title,
+        | ChartSpec::Plotly { title, .. } => title,
     }
 }
 
@@ -1227,6 +1118,124 @@ fn infer_chart_color(preview: &QueryPreview, x: &str, y: &[String]) -> Option<St
                 && !column_values_look_numeric(preview, column)
         })
         .cloned()
+}
+
+fn preview_rows_as_objects(preview: &QueryPreview) -> Vec<serde_json::Map<String, Value>> {
+    preview
+        .rows
+        .iter()
+        .map(|row| {
+            preview
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| (column.clone(), row.get(index).cloned().unwrap_or(Value::Null)))
+                .collect::<serde_json::Map<String, Value>>()
+        })
+        .collect()
+}
+
+fn row_column_values(rows: &[serde_json::Map<String, Value>], column: &str) -> Vec<Value> {
+    rows.iter()
+        .map(|row| row.get(column).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn group_rows_by(
+    rows: &[serde_json::Map<String, Value>],
+    column: &str,
+) -> Vec<(String, Vec<serde_json::Map<String, Value>>)> {
+    let mut ordered = Vec::<(String, Vec<serde_json::Map<String, Value>>)>::new();
+    for row in rows {
+        let key = row
+            .get(column)
+            .map(display_value)
+            .unwrap_or_else(|| "Other".to_string());
+        if let Some((_, bucket)) = ordered.iter_mut().find(|(existing, _)| *existing == key) {
+            bucket.push(row.clone());
+        } else {
+            ordered.push((key, vec![row.clone()]));
+        }
+    }
+    ordered
+}
+
+fn base_plotly_trace(
+    mark_type: &str,
+    horizontal: bool,
+    x_values: &[Value],
+    y_values: &[Value],
+    name: &str,
+    color: &str,
+    customdata: Vec<Vec<Value>>,
+    columns: &[String],
+) -> Value {
+    let axis_x = if horizontal { y_values } else { x_values };
+    let axis_y = if horizontal { x_values } else { y_values };
+    let trace_type = if mark_type == "line" { "scatter" } else { "bar" };
+    json!({
+        "type": trace_type,
+        "mode": if mark_type == "line" { Some("lines+markers") } else { None::<String> },
+        "orientation": if horizontal && mark_type == "bar" { Some("h") } else { None::<String> },
+        "x": axis_x,
+        "y": axis_y,
+        "name": name,
+        "marker": { "color": color },
+        "line": { "color": color, "width": 2.5 },
+        "customdata": transpose_customdata(customdata),
+        "hovertemplate": plotly_hover_template(columns),
+    })
+}
+
+fn transpose_customdata(columns: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    if columns.is_empty() {
+        return Vec::new();
+    }
+    let row_count = columns[0].len();
+    (0..row_count)
+        .map(|row_index| {
+            columns
+                .iter()
+                .map(|column| column.get(row_index).cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn plotly_hover_template(columns: &[String]) -> String {
+    let mut template = String::new();
+    for (index, column) in columns.iter().enumerate() {
+        template.push_str(&format!("{}: %{{customdata[{index}]}}<br>", prettify_column(column)));
+    }
+    template.push_str("<extra></extra>");
+    template
+}
+
+fn restyle_plotly_figure_as_stacked_bar(mut figure: Value, title: &str) -> Value {
+    if let Some(data) = figure.get_mut("data").and_then(Value::as_array_mut) {
+        for trace in data {
+            if let Some(object) = trace.as_object_mut() {
+                object.insert("type".to_string(), json!("bar"));
+                object.remove("mode");
+                object.remove("orientation");
+            }
+        }
+    }
+    if let Some(layout) = figure.get_mut("layout").and_then(Value::as_object_mut) {
+        layout.insert("barmode".to_string(), json!("stack"));
+        layout.insert("title".to_string(), json!({ "text": title, "x": 0.02, "font": { "family": "Space Grotesk, sans-serif", "color": "#f5f5f5", "size": 16 } }));
+    }
+    figure
+}
+
+fn display_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Null => "Null".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn choose_primary_category(categorical: &[String]) -> String {

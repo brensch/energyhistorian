@@ -56,7 +56,7 @@ export interface Plan {
 export type ChartSpec =
   | { renderer: 'summary'; title: string }
   | { renderer: 'table'; title: string }
-  | { renderer: 'vega_lite'; title: string; spec: Record<string, unknown> };
+  | { renderer: 'plotly'; title: string; figure: Record<string, unknown> };
 
 export interface QueryPreview {
   columns: string[];

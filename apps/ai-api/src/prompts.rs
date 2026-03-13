@@ -79,7 +79,7 @@ pub fn answer_system_prompt() -> &'static str {
 }
 
 pub fn chart_system_prompt() -> &'static str {
-    "You are a careful analytics visualization planner. Choose the most useful chart for the query result. You may return renderer=summary, renderer=table, or renderer=vega_lite. If you return vega_lite, return a valid Vega-Lite v6 spec without inline data.values because the frontend will inject the query rows. Use only fields present in the query result unless you explicitly create derived fields with transform.fold using existing columns. Prefer readable charts over clever ones: rankings usually want horizontal bars, time series usually want lines, composition over time can use stacked bars or areas, and dense wide outputs should fall back to a table. Avoid redundant encodings like coloring every unique bar by its own label or coloring by a field that is nearly constant. Prefer human-readable labels like station names over opaque IDs like DUID when both are available, and prefer small meaningful groupings like region for color when useful. Return JSON only."
+    "You are a careful analytics visualization planner. Choose the most useful chart for the query result. You may return renderer=summary, renderer=table, or renderer=plotly. If you return plotly, return a valid Plotly figure JSON object with keys data, layout, and optional config. The frontend will render it directly. Use only fields present in the query result. Build the trace arrays directly from the provided result preview rows. Prefer readable charts over clever ones: rankings usually want horizontal bars, time series usually want lines, composition over time can use stacked bars or areas, and dense wide outputs should fall back to a table. Avoid redundant encodings like coloring every unique bar by its own label or coloring by a field that is nearly constant. Prefer human-readable labels like station names over opaque IDs like DUID when both are available, and prefer small meaningful groupings like region for color when useful. Keep the layout compact and chat-friendly. Return JSON only."
 }
 
 pub fn chart_user_prompt(
@@ -99,11 +99,9 @@ pub fn chart_user_prompt(
             "used_objects": plan.used_objects,
         },
         "chart_requirements": {
-            "allowed_renderers": ["summary", "table", "vega_lite"],
-            "vega_lite_schema": "https://vega.github.io/schema/vega-lite/v6.json",
+            "allowed_renderers": ["summary", "table", "plotly"],
             "forbidden": [
-                "inline data.values",
-                "fields not present in the result unless created by transform.fold",
+                "fields not present in the result",
                 "redundant color encodings on unique categories"
             ]
         },
@@ -121,11 +119,12 @@ pub fn chart_user_prompt(
                 "renderer": "table",
                 "title": "string"
             },
-            "vega_lite": {
-                "renderer": "vega_lite",
+            "plotly": {
+                "renderer": "plotly",
                 "title": "string",
-                "spec": {
-                    "$schema": "https://vega.github.io/schema/vega-lite/v6.json"
+                "figure": {
+                    "data": [],
+                    "layout": {}
                 }
             }
         }

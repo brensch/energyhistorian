@@ -47,7 +47,7 @@ pub struct Plan {
 pub enum ChartSpec {
     Summary { title: String },
     Table { title: String },
-    VegaLite { title: String, spec: Value },
+    Plotly { title: String, figure: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

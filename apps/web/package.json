@@ -11,13 +11,11 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",
     "@workos-inc/authkit-react": "^0.16.0",
+    "plotly.js-basic-dist-min": "^3.4.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "react-vega": "^8.0.0",
-    "tailwindcss": "^4.2.1",
-    "vega-embed": "^7.1.0",
-    "vega": "^6.2.0",
-    "vega-lite": "^6.4.2"
+    "react-plotly.js": "^2.6.0",
+    "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
     "@types/react": "^19.1.12",

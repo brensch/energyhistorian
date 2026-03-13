@@ -1,7 +1,9 @@
-import { VegaEmbed } from 'react-vega';
-import type { VisualizationSpec } from 'vega-embed';
+import createPlotlyComponent from 'react-plotly.js/factory';
+import Plotly from 'plotly.js-basic-dist-min';
 
 import type { ChartSpec, QueryPreview } from '../types';
+
+const Plot = createPlotlyComponent(Plotly);
 
 interface ChartPanelProps {
   chart: ChartSpec | null;
@@ -66,36 +68,27 @@ export function ChartPanel({ chart, preview }: ChartPanelProps) {
     );
   }
 
-  const spec = withData(chart.spec, preview);
+  const figure = chart.figure;
+  const data = Array.isArray(figure.data) ? figure.data : [];
+  const layout =
+    figure.layout && typeof figure.layout === 'object' ? figure.layout : {};
+  const config =
+    figure.config && typeof figure.config === 'object' ? figure.config : {};
 
   return (
     <section className="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-950/70 p-3">
-      <VegaEmbed
-        options={{ actions: false, renderer: 'svg' }}
-        spec={spec}
-        style={{ width: '100%' }}
+      <Plot
+        data={data as never}
+        layout={layout as never}
+        config={config as never}
+        style={{ width: '100%', height: '100%' }}
       />
     </section>
   );
 }
 
-function withData(spec: Record<string, unknown>, preview: QueryPreview): VisualizationSpec {
-  return {
-    ...(spec as unknown as VisualizationSpec),
-    data: {
-      values: rowsToObjects(preview),
-    },
-  } as VisualizationSpec;
-}
-
-function rowsToObjects(preview: QueryPreview) {
-  return preview.rows.map((row) =>
-    Object.fromEntries(preview.columns.map((column, index) => [column, row[index]])),
-  );
-}
-
 function prettify(value: string) {
-  return value.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (part) => part.toUpperCase());
+  return value.replaceAll('_', ' ').replaceAll('.', ' ').replace(/\b\w/g, (part) => part.toUpperCase());
 }
 
 function formatValue(value: unknown) {
