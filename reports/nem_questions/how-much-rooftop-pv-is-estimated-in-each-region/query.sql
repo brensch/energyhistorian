@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Rooftop PV needs an external rooftop PV or operational demand dataset.' AS reason

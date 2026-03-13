@@ -1,7 +1,0 @@
-{
-  "question": "How accurate was the 5-minute pre-dispatch price forecast?",
-  "slug": "how-accurate-was-the-5-minute-pre-dispatch-price-forecast",
-  "status": "proxy",
-  "data_description": "This report is derived from the following semantic surfaces in ClickHouse: `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes. `semantic.p5min_regionsolution`, reconciled to one row per target interval, run time, and region, providing 5-minute ahead forecast and solution outputs.",
-  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

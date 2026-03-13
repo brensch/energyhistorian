@@ -1,7 +1,0 @@
-{
-  "question": "How far ahead does the pre-dispatch forecast diverge significantly from actual?",
-  "slug": "how-far-ahead-does-the-pre-dispatch-forecast-diverge-significantly-from-actual",
-  "status": "blocked",
-  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
-  "note": "The current semantic views collapse most forecast horizons, so ahead-time divergence is not recoverable cleanly yet. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

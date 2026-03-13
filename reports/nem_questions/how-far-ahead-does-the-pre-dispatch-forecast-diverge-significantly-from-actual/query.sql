@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'This needs a forecast-horizon mart that keeps multiple predispatch runs for the same target interval.' AS reason

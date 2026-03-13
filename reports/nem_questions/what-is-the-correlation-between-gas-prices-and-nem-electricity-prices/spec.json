@@ -1,7 +1,0 @@
-{
-  "question": "What is the correlation between gas prices and NEM electricity prices?",
-  "slug": "what-is-the-correlation-between-gas-prices-and-nem-electricity-prices",
-  "status": "blocked",
-  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
-  "note": "No gas price dataset is loaded into ClickHouse. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

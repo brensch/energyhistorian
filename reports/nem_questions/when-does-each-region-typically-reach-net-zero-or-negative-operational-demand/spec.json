@@ -1,7 +1,0 @@
-{
-  "question": "When does each region typically reach net zero or negative operational demand?",
-  "slug": "when-does-each-region-typically-reach-net-zero-or-negative-operational-demand",
-  "status": "blocked",
-  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
-  "note": "The required operational-demand input is missing. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

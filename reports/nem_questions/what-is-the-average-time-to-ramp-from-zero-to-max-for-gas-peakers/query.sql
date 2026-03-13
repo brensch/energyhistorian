@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Ramp-to-max timing needs event segmentation from interval output traces.' AS reason

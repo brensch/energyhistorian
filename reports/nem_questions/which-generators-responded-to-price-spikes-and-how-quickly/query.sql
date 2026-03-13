@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'This needs event-window response logic with pre- and post-spike ramp comparison.' AS reason

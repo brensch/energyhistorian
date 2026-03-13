@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Temperature correlation requires an external weather dataset.' AS reason

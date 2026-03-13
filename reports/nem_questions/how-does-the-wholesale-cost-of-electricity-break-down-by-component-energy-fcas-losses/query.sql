@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'A component breakdown needs an explicit settlement mart for energy, FCAS, and losses.' AS reason

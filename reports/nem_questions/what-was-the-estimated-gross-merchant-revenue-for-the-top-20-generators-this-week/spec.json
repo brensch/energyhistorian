@@ -1,7 +1,0 @@
-{
-  "question": "What was the estimated gross merchant revenue for the top 20 generators this week?",
-  "slug": "what-was-the-estimated-gross-merchant-revenue-for-the-top-20-generators-this-week",
-  "status": "proxy",
-  "data_description": "This report is derived from the following semantic surfaces in ClickHouse: `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes. `semantic.actual_gen_duid`, reconciled to one row per interval and DUID, representing metered energy readings used as actual generation. `semantic.unit_dimension`, the current reconciled DUID dimension derived from MMSDM registration history, providing region, participant, station, fuel, registered capacity, storage flags, dispatch type, and emissions factor.",
-  "note": "Gross merchant revenue is estimated as interval energy multiplied by regional spot price. This excludes contracts, settlement adjustments, losses, FCAS revenue, and bidding effects. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Gas price correlation requires an external gas market dataset.' AS reason

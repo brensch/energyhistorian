@@ -1,7 +1,0 @@
-{
-  "question": "Which constraints were most frequently binding in the last 30 days?",
-  "slug": "which-constraints-were-most-frequently-binding-in-the-last-30-days",
-  "status": "ready",
-  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.dispatch_constraint`, reconciled to one row per settlement interval and constraint, providing RHS, LHS, marginal value, and violation degree.",
-  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

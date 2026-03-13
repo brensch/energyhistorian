@@ -1,7 +1,0 @@
-{
-  "question": "How much CO2 was avoided by renewable generation vs the marginal generator?",
-  "slug": "how-much-co2-was-avoided-by-renewable-generation-vs-the-marginal-generator",
-  "status": "blocked",
-  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
-  "note": "The semantic layer does not yet expose a defensible marginal-generator carbon counterfactual. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

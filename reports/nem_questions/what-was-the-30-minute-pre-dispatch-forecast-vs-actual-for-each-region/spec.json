@@ -1,7 +1,0 @@
-{
-  "question": "What was the 30-minute pre-dispatch forecast vs actual for each region?",
-  "slug": "what-was-the-30-minute-pre-dispatch-forecast-vs-actual-for-each-region",
-  "status": "proxy",
-  "data_description": "This report is derived from the following semantic surfaces in ClickHouse: `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes. `semantic.predispatch_region_prices`, reconciled to one row per forecast interval and region, providing predispatch regional price forecasts.",
-  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

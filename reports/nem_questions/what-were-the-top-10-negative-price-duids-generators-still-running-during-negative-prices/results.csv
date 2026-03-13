@@ -1,5 +1,0 @@
-g.DUID,REGIONID,FUEL_TYPE,negative_price_intervals_running,energy_mwh_at_negative_prices
-WNSF1,VIC1,Solar,4,87.96
-MLWF1,VIC1,Wind,4,16.86
-DIAPURWF1,VIC1,Wind,4,7.2
-WAUBRAWF,VIC1,Wind,1,1.56

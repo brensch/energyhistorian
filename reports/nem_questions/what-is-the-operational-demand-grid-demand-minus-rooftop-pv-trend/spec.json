@@ -1,7 +1,0 @@
-{
-  "question": "What is the operational demand (grid demand minus rooftop PV) trend?",
-  "slug": "what-is-the-operational-demand-grid-demand-minus-rooftop-pv-trend",
-  "status": "blocked",
-  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
-  "note": "Operational demand is not derivable from the current semantic tables alone. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

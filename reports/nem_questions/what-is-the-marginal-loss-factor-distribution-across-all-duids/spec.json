@@ -1,7 +1,0 @@
-{
-  "question": "What is the marginal loss factor distribution across all DUIDs?",
-  "slug": "what-is-the-marginal-loss-factor-distribution-across-all-duids",
-  "status": "ready",
-  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.marginal_loss_factors`, a NEMWEB-derived reference view containing transmission loss factors by DUID and connection point.",
-  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

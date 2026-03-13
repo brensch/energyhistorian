@@ -1,7 +1,0 @@
-{
-  "question": "How does the wholesale cost of electricity break down by component (energy, FCAS, losses)?",
-  "slug": "how-does-the-wholesale-cost-of-electricity-break-down-by-component-energy-fcas-losses",
-  "status": "blocked",
-  "data_description": "No production semantic fact or dimension could be queried for this report. The SQL bundle is a diagnostic placeholder because the required dataset or modeled surface is not yet available in ClickHouse.",
-  "note": "The semantic layer does not yet expose settlement-grade cost components. Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

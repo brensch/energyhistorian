@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Avoided CO2 versus the marginal generator needs marginal-unit identification and counterfactual dispatch logic.' AS reason

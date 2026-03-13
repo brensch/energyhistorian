@@ -1,7 +1,0 @@
-{
-  "question": "Which region is most dependent on interconnector imports?",
-  "slug": "which-region-is-most-dependent-on-interconnector-imports",
-  "status": "proxy",
-  "data_description": "This report is derived from the following semantic surface in ClickHouse: `semantic.daily_region_dispatch`, reconciled to one row per settlement interval and region, providing regional demand, dispatch, interchange, available generation, excess generation, and regional FCAS enablement fields.",
-  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

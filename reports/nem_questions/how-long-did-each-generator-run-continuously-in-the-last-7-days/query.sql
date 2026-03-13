@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Continuous run-length segmentation is not yet implemented in the report harness.' AS reason

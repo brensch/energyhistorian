@@ -1,7 +1,0 @@
-{
-  "question": "Was there a correlation between demand forecast errors and price spikes?",
-  "slug": "was-there-a-correlation-between-demand-forecast-errors-and-price-spikes",
-  "status": "ready",
-  "data_description": "This report is derived from the following semantic surfaces in ClickHouse: `semantic.daily_region_dispatch`, reconciled to one row per settlement interval and region, providing regional demand, dispatch, interchange, available generation, excess generation, and regional FCAS enablement fields. `semantic.dispatch_price`, reconciled to one row per settlement interval and region, providing 5-minute energy and FCAS regional price outcomes.",
-  "note": "Results are generated from the current semantic layer in ClickHouse. If the warehouse does not yet contain full market history, the answer reflects the available window rather than authoritative all-time history."
-}

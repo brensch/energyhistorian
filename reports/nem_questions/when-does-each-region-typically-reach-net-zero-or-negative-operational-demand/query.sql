@@ -1,1 +1,0 @@
-SELECT 'blocked' AS status, 'Net operational demand requires rooftop PV or an operational demand dataset.' AS reason
