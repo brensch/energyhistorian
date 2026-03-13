@@ -6,7 +6,8 @@ Rust-first energy market historisation platform, moving toward a Kubernetes-nati
 
 - `apps/`
   - runnable Rust services
-  - `schedulerd`, `downloaderd`, `parserd`
+  - `ai-api`
+  - future control-plane services such as `schedulerd`, `downloaderd`, `parserd`
 - `libs/`
   - reusable Rust libraries
   - source plugins stay here so execution topology can change without rewriting source semantics
@@ -118,6 +119,8 @@ flowchart LR
 ### Question answering and report generation
 
 `scripts/ask_nem.py` is the current dynamic answering harness. It treats the semantic layer as the allowed analytical surface, uses an OpenAI model to plan read-only SQL, executes the query in ClickHouse, and emits a report bundle.
+
+`apps/ai-api` is the new service version of that flow. It moves auth, chat state, usage tracking, and billing into a long-lived Rust API backed by Postgres and ClickHouse.
 
 The process is:
 

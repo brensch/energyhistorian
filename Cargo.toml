@@ -6,6 +6,7 @@ edition = "2024"
 [workspace]
 members = [
   ".",
+  "apps/ai-api",
   "crates/ingest-core",
   "crates/sources/source-aemo-dvd",
   "crates/sources/source-aemo-metadata",

@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply m-0 bg-neutral-950 font-sans text-neutral-100 antialiased;
+  }
+
+  * {
+    scrollbar-color: theme(colors.neutral.700) transparent;
+  }
+
+  ::selection {
+    @apply bg-neutral-700 text-white;
+  }
+}

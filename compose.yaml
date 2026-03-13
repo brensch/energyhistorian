@@ -53,6 +53,101 @@ services:
       timeout: 5s
       retries: 12
 
+  postgres:
+    profiles: ["ai"]
+    image: postgres:16
+    environment:
+      POSTGRES_USER: energyhistorian
+      POSTGRES_PASSWORD: energyhistorian
+      POSTGRES_DB: energyhistorian
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U energyhistorian -d energyhistorian"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  clickhouse-bootstrap:
+    profiles: ["ai"]
+    image: clickhouse/clickhouse-server:25.2
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        set -euo pipefail
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "CREATE USER IF NOT EXISTS ai_api_readonly IDENTIFIED BY 'ai_api_readonly'"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "ALTER USER ai_api_readonly SETTINGS readonly = 1"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON semantic.* TO ai_api_readonly"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_nemweb.* TO ai_api_readonly"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_mmsdm.* TO ai_api_readonly"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_metadata_dvd.* TO ai_api_readonly"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_metadata_html.* TO ai_api_readonly"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON system.columns TO ai_api_readonly"
+        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON system.tables TO ai_api_readonly"
+
+  ai-api:
+    profiles: ["ai"]
+    build:
+      context: .
+      dockerfile: apps/ai-api/Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      clickhouse-bootstrap:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      AI_API_PORT: "8090"
+      DATABASE_URL: postgres://energyhistorian:energyhistorian@postgres:5432/energyhistorian
+      CLICKHOUSE_READ_URL: http://ai_api_readonly:ai_api_readonly@clickhouse:8123/default
+      CLICKHOUSE_WRITE_URL: http://energyhistorian:energyhistorian@clickhouse:8123/tracking
+      CLICKHOUSE_VIEW_DB: semantic
+      CLICKHOUSE_USAGE_DB: tracking
+      FRONTEND_URL: http://localhost:3000
+      ALLOW_DEV_AUTH: "true"
+      WORKOS_ISSUER: http://workos.invalid
+      WORKOS_AUDIENCE: dev-client
+      LLM_PROVIDER: openai
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://localhost:3000}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://localhost:3000}
+      STRIPE_PORTAL_RETURN_URL: ${STRIPE_PORTAL_RETURN_URL:-http://localhost:3000}
+    ports:
+      - "8090:8090"
+
+  web:
+    profiles: ["ai"]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      ai-api:
+        condition: service_started
+    environment:
+      API_BASE_URL: http://localhost:8090
+      WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
+      WORKOS_API_HOSTNAME: ${WORKOS_API_HOSTNAME:-}
+      ENABLE_DEV_AUTH: "true"
+      DEV_USER_ID: dev-user
+      DEV_USER_EMAIL: dev@example.com
+      DEV_USER_NAME: Developer
+      DEV_ORG_ID: dev-org
+    ports:
+      - "3000:8080"
+
 volumes:
   clickhouse-data:
   historian-data:
+  postgres-data:
