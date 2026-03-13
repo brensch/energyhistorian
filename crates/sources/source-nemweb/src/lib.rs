@@ -12,9 +12,9 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
     DiscoveredArtifact, DiscoveryCursorHint, DiscoveryRequest, LocalArtifact, ParseResult,
     PluginCapabilities, PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult,
-    RuntimeSourcePlugin, SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection,
-    SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin,
-    StructuredRawEventSink, TaskBlueprint, TaskKind, semantic_model_registry_sql,
+    RuntimeSourcePlugin, SemanticDedupeRule, SemanticJob, SemanticModel, SemanticNamingStrategy,
+    SourceCollection, SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument,
+    SourcePlugin, StructuredRawEventSink, TaskBlueprint, TaskKind, semantic_model_registry_sql,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -551,6 +551,16 @@ impl SourcePlugin for NemwebPlugin {
                 target_database: "semantic".to_string(),
                 include_latest_alias: true,
                 naming_strategy: SemanticNamingStrategy::Default,
+                dedupe_rules: vec![
+                    SemanticDedupeRule {
+                        view_name: "dunit".to_string(),
+                        key_columns: vec!["SETTLEMENTDATE".to_string(), "DUID".to_string()],
+                    },
+                    SemanticDedupeRule {
+                        view_name: "dispatch_constraint".to_string(),
+                        key_columns: vec!["SETTLEMENTDATE".to_string(), "CONSTRAINTID".to_string()],
+                    },
+                ],
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use ingest_core::{SemanticJob, SemanticNamingStrategy};
+use ingest_core::{SemanticDedupeRule, SemanticJob, SemanticNamingStrategy};
 use serde::{Deserialize, Deserializer};
 
 use crate::clickhouse::{ClickHousePublisher, raw_database_name, sanitize_identifier};
@@ -72,6 +72,7 @@ async fn reconcile_job(
             target_database,
             include_latest_alias,
             naming_strategy,
+            dedupe_rules,
         } => {
             reconcile_observed_schema_views(
                 publisher,
@@ -79,6 +80,7 @@ async fn reconcile_job(
                 target_database,
                 *include_latest_alias,
                 *naming_strategy,
+                dedupe_rules,
             )
             .await
         }
@@ -123,6 +125,7 @@ async fn reconcile_observed_schema_views(
     target_database: &str,
     include_latest_alias: bool,
     naming_strategy: SemanticNamingStrategy,
+    dedupe_rules: &[SemanticDedupeRule],
 ) -> Result<usize> {
     let raw_database = raw_database_name(source_id);
     let observed = publisher
@@ -156,6 +159,11 @@ async fn reconcile_observed_schema_views(
         }
     }
 
+    let dedupe_rules_by_view = dedupe_rules
+        .iter()
+        .map(|rule| (rule.view_name.as_str(), rule.key_columns.as_slice()))
+        .collect::<HashMap<_, _>>();
+
     let mut executed = 0usize;
     for ((logical_section, logical_table), versions) in groups {
         let base_name = semantic_view_base_name(&logical_section, &logical_table, naming_strategy);
@@ -174,8 +182,13 @@ async fn reconcile_observed_schema_views(
                     sanitize_identifier(&version.report_version)
                 )
             };
-            let union_sql =
-                build_union_view_sql(publisher, &raw_database, &version.physical_tables).await?;
+            let union_sql = build_union_view_sql(
+                publisher,
+                &raw_database,
+                &version.physical_tables,
+                dedupe_rules_by_view.get(base_name.as_str()).copied(),
+            )
+            .await?;
             replace_view(
                 publisher,
                 &qualified_name(target_database, &view_name),
@@ -211,6 +224,7 @@ async fn build_union_view_sql(
     publisher: &ClickHousePublisher,
     raw_database: &str,
     physical_tables: &[String],
+    dedupe_key_columns: Option<&[String]>,
 ) -> Result<String> {
     let mut physical_tables = physical_tables.to_vec();
     physical_tables.sort();
@@ -254,6 +268,11 @@ async fn build_union_view_sql(
         }
     }
 
+    let table_column_counts = columns_by_table
+        .iter()
+        .map(|(table, table_columns)| (table.as_str(), table_columns.len()))
+        .collect::<HashMap<_, _>>();
+
     let selects = physical_tables
         .iter()
         .map(|table| {
@@ -285,13 +304,61 @@ async fn build_union_view_sql(
                 .collect::<Vec<_>>()
                 .join(", ");
             Ok(format!(
-                "SELECT {expressions} FROM {raw_database}.{}",
-                sanitize_identifier(table)
+                "SELECT {expressions}, toUInt32({column_count}) AS `_source_column_count` FROM {raw_database}.{}",
+                sanitize_identifier(table),
+                column_count = table_column_counts
+                    .get(table.as_str())
+                    .copied()
+                    .unwrap_or(table_columns.len()),
             ))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(selects.join(" UNION ALL "))
+    let union_sql = selects.join(" UNION ALL ");
+    if let Some(key_columns) = dedupe_key_columns {
+        if !key_columns.is_empty()
+            && key_columns
+                .iter()
+                .all(|column| preferred_order.iter().any(|candidate| candidate == column))
+        {
+            let projected_columns = preferred_order
+                .iter()
+                .map(|column| format!("`{column}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let partition_by = key_columns
+                .iter()
+                .map(|column| format!("`{column}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(format!(
+                "SELECT {projected_columns} \
+                 FROM ( \
+                     SELECT {projected_columns}, row_number() OVER (PARTITION BY {partition_by} ORDER BY `_source_column_count` DESC, processed_at DESC, artifact_id DESC) AS _dedupe_rank \
+                     FROM ({union_sql}) \
+                 ) \
+                 WHERE _dedupe_rank = 1"
+            ));
+        }
+    }
+
+    if preferred_order.iter().any(|column| column == "row_hash") {
+        let projected_columns = preferred_order
+            .iter()
+            .map(|column| format!("`{column}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!(
+            "SELECT {projected_columns} \
+             FROM ( \
+                 SELECT {projected_columns}, row_number() OVER (PARTITION BY row_hash ORDER BY processed_at DESC, artifact_id DESC) AS _dedupe_rank \
+                 FROM ({union_sql}) \
+             ) \
+             WHERE _dedupe_rank = 1"
+        ));
+    }
+
+    Ok(union_sql)
 }
 
 async fn replace_view(publisher: &ClickHousePublisher, full_name: &str, sql: &str) -> Result<()> {

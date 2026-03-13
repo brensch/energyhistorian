@@ -45,8 +45,28 @@ QUERY_SURFACE_GUIDANCE = (
     "semantic.daily_unit_dispatch joined to semantic.unit_dimension and compute a proxy MWh as "
     "greatest(TOTALCLEARED, 0) / 12. Use semantic.actual_gen_duid only when the user explicitly asks "
     "for metered actual generation or actual meter readings. If the user says 'energy used' but the "
-    "available semantic surface is generation by fuel, say that clearly in the note."
+    "available semantic surface is generation by fuel, say that clearly in the note. "
+    "Do not answer questions about fuel consumed, gas used, coal burned, stockpiles, inventories, or other physical fuel inputs "
+    "with generation or dispatch proxies; those must be blocked unless an explicit fuel-consumption or inventory dataset exists. "
+    "Questions about battery charging may use a dispatch proxy based on negative TOTALCLEARED for storage units if you say that clearly."
 )
+
+PHYSICAL_CONSUMPTION_PATTERNS = [
+    r"\bused\b",
+    r"\bconsum(?:ed|ption)\b",
+    r"\bburn(?:ed|t)?\b",
+    r"\bstockpile\b",
+    r"\binventory\b",
+    r"\bfuel use\b",
+    r"\bfuel consumed\b",
+    r"\bgas used\b",
+    r"\bcoal used\b",
+]
+PROXY_ONLY_OBJECTS = {
+    "semantic.daily_unit_dispatch",
+    "semantic.dispatch_unit_solution",
+    "semantic.actual_gen_duid",
+}
 
 
 def log(message: str) -> None:
@@ -456,6 +476,40 @@ def validate_sql(sql: str, allowed_objects: set[str]) -> str:
     return sql
 
 
+def question_requests_physical_consumption(question: str) -> bool:
+    lowered = question.lower()
+    if "battery" in lowered and ("charge" in lowered or "charging" in lowered):
+        return False
+    return any(re.search(pattern, lowered) for pattern in PHYSICAL_CONSUMPTION_PATTERNS)
+
+
+def enforce_semantic_contract(question: str, plan: Plan) -> Plan:
+    if (
+        plan.status == "answerable"
+        and question_requests_physical_consumption(question)
+        and set(plan.used_objects).intersection(PROXY_ONLY_OBJECTS)
+    ):
+        return Plan(
+            status="blocked",
+            sql="",
+            used_objects=plan.used_objects,
+            data_description=(
+                "The current semantic layer exposes generation, dispatch, bids, prices, and registration metadata, "
+                "but not physical fuel-consumption or inventory measurements."
+            ),
+            note=(
+                "Blocked because the question asks about physical fuel use or inventory, and the planned semantic surface "
+                "would only provide dispatch or generation proxies. That would be directionally misleading."
+            ),
+            chart_title=plan.chart_title,
+            confidence="low",
+            reason=(
+                "The current semantic surface does not contain physical fuel-consumption or inventory data, so proxying from generation/dispatch is not reliable."
+            ),
+        )
+    return plan
+
+
 def repair_plan(question: str, registry: list[dict[str, Any]], plan: Plan, error: str, model: str) -> Plan:
     log(f"repairing plan after failure: {error}")
     system_prompt = (
@@ -583,6 +637,35 @@ def fallback_chart_spec(df: pd.DataFrame, title: str) -> ChartSpec:
     return ChartSpec(kind="bar", x=df.columns[0], y=df.columns[-1], color=None, title=title)
 
 
+def should_use_llm_chart_planner(df: pd.DataFrame) -> bool:
+    if df.empty or len(df) <= 1 or len(df.columns) <= 2:
+        return False
+    return True
+
+
+def build_summary_figure(df: pd.DataFrame, title: str) -> go.Figure:
+    fig = go.Figure()
+    if df.empty:
+        text = "Query returned no rows"
+    elif len(df) == 1:
+        parts = [f"{column}: {df.iloc[0][column]}" for column in df.columns[:4]]
+        text = "<br>".join(parts)
+    else:
+        text = f"{len(df)} rows returned"
+    fig.add_annotation(
+        text=text,
+        showarrow=False,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        font={"size": 20},
+        align="center",
+    )
+    fig.update_layout(title=title, template="plotly_white")
+    return fig
+
+
 def build_chart(df: pd.DataFrame, title: str, png_path: Path, html_path: Path, blocked: bool, model: str, question: str, plan: Plan) -> None:
     if blocked or df.empty:
         fig = go.Figure()
@@ -596,8 +679,14 @@ def build_chart(df: pd.DataFrame, title: str, png_path: Path, html_path: Path, b
             font={"size": 20},
         )
         fig.update_layout(title=title, template="plotly_white")
+    elif len(df) <= 1 or len(df.columns) <= 1:
+        fig = build_summary_figure(df, title)
     else:
-        spec = plan_chart(question, plan, df, model)
+        spec = (
+            plan_chart(question, plan, df, model)
+            if should_use_llm_chart_planner(df)
+            else fallback_chart_spec(df, plan.chart_title)
+        )
         log(
             f"rendering Plotly chart kind={spec.kind} x={spec.x} y={spec.y} color={spec.color or 'none'}"
         )
@@ -723,7 +812,7 @@ def write_bundle(question: str, plan: Plan, answer: str, df: pd.DataFrame, outpu
 
 def run_query(client, question: str, registry: list[dict[str, Any]], model: str) -> tuple[Plan, pd.DataFrame]:
     allowed_objects = {entry["object_name"] for entry in registry}
-    plan = plan_question(question, registry, model)
+    plan = enforce_semantic_contract(question, plan_question(question, registry, model))
     if plan.status != "answerable" or not plan.sql:
         blocked = Plan(
             status="blocked",
@@ -755,7 +844,9 @@ def run_query(client, question: str, registry: list[dict[str, Any]], model: str)
             last_error = str(exc)
             log(f"query attempt failed: {last_error}")
         if attempt < max_attempts - 1:
-            plan = repair_plan(question, registry, plan, last_error, model)
+            plan = enforce_semantic_contract(
+                question, repair_plan(question, registry, plan, last_error, model)
+            )
             if plan.status != "answerable" or not plan.sql:
                 log("repair plan returned blocked or empty SQL; stopping retries")
                 break

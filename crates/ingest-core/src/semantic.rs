@@ -7,11 +7,18 @@ pub enum SemanticNamingStrategy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticDedupeRule {
+    pub view_name: String,
+    pub key_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SemanticJob {
     ConsolidateObservedSchemaViews {
         target_database: String,
         include_latest_alias: bool,
         naming_strategy: SemanticNamingStrategy,
+        dedupe_rules: Vec<SemanticDedupeRule>,
     },
     SqlView {
         target_database: String,

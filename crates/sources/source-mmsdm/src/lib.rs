@@ -383,6 +383,7 @@ impl SourcePlugin for MmsdmPlugin {
                 target_database: "semantic".to_string(),
                 include_latest_alias: true,
                 naming_strategy: SemanticNamingStrategy::StripYearTokens,
+                dedupe_rules: Vec::new(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),

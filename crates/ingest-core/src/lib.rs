@@ -34,7 +34,8 @@ pub use schema::{
 };
 pub use schema_registry::{FileSchemaRegistry, SchemaRegistrationOutcome};
 pub use semantic::{
-    SemanticJob, SemanticModel, SemanticNamingStrategy, semantic_model_registry_sql,
+    SemanticDedupeRule, SemanticJob, SemanticModel, SemanticNamingStrategy,
+    semantic_model_registry_sql,
 };
 pub use source_family::{SourceFamily, SourceFamilyCatalogEntry};
 pub use state::{ArtifactProcessingStatus, ProcessingCheckpoint, ProcessingEvent};
