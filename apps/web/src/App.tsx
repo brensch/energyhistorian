@@ -24,11 +24,21 @@ const SUGGESTED_QUESTIONS = [
   'How did VIC1 and SA1 prices compare yesterday?',
 ];
 
+function conversationIdFromHash(hash: string) {
+  const value = hash.replace(/^#/, '').trim();
+  return value || null;
+}
+
 export default function App() {
   const auth = useAppAuth();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    return conversationIdFromHash(window.location.hash);
+  });
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [liveRun, setLiveRun] = useState<LiveRunState | null>(null);
@@ -101,6 +111,31 @@ export default function App() {
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, liveRun]);
+
+  useEffect(() => {
+    function syncFromHash() {
+      const hashConversationId = conversationIdFromHash(window.location.hash);
+      setActiveConversationId((current) =>
+        current === hashConversationId ? current : hashConversationId,
+      );
+    }
+
+    window.addEventListener('hashchange', syncFromHash);
+    return () => {
+      window.removeEventListener('hashchange', syncFromHash);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const nextHash = activeConversationId ? `#${activeConversationId}` : '';
+    if (window.location.hash !== nextHash) {
+      const url = `${window.location.pathname}${window.location.search}${nextHash}`;
+      window.history.replaceState(null, '', url);
+    }
+  }, [activeConversationId]);
 
   const conversationTitle = useMemo(() => {
     return conversations.find((conversation) => conversation.id === activeConversationId)?.title;
@@ -236,7 +271,7 @@ export default function App() {
 
   if (!auth.ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-950 text-neutral-400">
+      <div className="flex min-h-screen items-center justify-center bg-neutral-900 text-neutral-400">
         Loading authentication…
       </div>
     );
@@ -244,7 +279,7 @@ export default function App() {
 
   if (!auth.isAuthenticated && !auth.headers['X-Dev-User-Id']) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-neutral-950 p-6">
+      <main className="flex min-h-screen items-center justify-center bg-neutral-900 p-6">
         <section className="w-full max-w-2xl rounded-[2rem] border border-neutral-800 bg-neutral-900/80 p-10 shadow-[0_30px_100px_rgba(0,0,0,0.4)]">
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
             NEM Explorer
@@ -269,8 +304,8 @@ export default function App() {
   }
 
   return (
-    <main className="flex h-screen bg-neutral-950 text-neutral-100">
-      <aside className="hidden w-[320px] shrink-0 flex-col border-r border-neutral-900 bg-neutral-950 px-4 py-5 lg:flex">
+    <main className="flex h-screen bg-neutral-900 text-neutral-100">
+      <aside className="relative z-10 hidden w-[320px] shrink-0 flex-col overflow-hidden border-r border-neutral-900 bg-neutral-950 px-4 py-5 lg:flex">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
@@ -281,7 +316,7 @@ export default function App() {
             </h1>
           </div>
           <button
-            className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800"
+            className="rounded-xl border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-900"
             onClick={handleNewChat}
             type="button"
           >
@@ -293,37 +328,39 @@ export default function App() {
           Semantic warehouse chat with inline charts and SQL-backed answers.
         </p>
 
-        <div className="mt-8 min-h-0">
-          <ConversationList
-            activeConversationId={activeConversationId}
-            conversations={conversations}
-            onSelect={setActiveConversationId}
-          />
+        <div className="mt-8 flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <ConversationList
+              activeConversationId={activeConversationId}
+              conversations={conversations}
+              onSelect={setActiveConversationId}
+            />
+          </div>
+
+          <section className="mt-6 shrink-0 border-t border-neutral-900 pt-6">
+            <div className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
+              Suggested
+            </div>
+            <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+              {SUGGESTED_QUESTIONS.map((question) => (
+                <button
+                  key={question}
+                  className="block w-full rounded-xl border border-transparent bg-transparent px-3 py-2.5 text-left text-sm leading-6 text-neutral-400 transition hover:border-neutral-800 hover:bg-neutral-900 hover:text-neutral-200"
+                  onClick={() => {
+                    if (!liveRun?.busy) {
+                      void handleSubmit(question);
+                    }
+                  }}
+                  type="button"
+                >
+                  {question}
+                </button>
+              ))}
+            </div>
+          </section>
         </div>
 
-        <section className="mt-8">
-          <div className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
-            Suggested
-          </div>
-          <div className="flex flex-col gap-2">
-            {SUGGESTED_QUESTIONS.map((question) => (
-              <button
-                key={question}
-                className="rounded-2xl border border-neutral-900 bg-neutral-950 px-3 py-3 text-left text-sm leading-6 text-neutral-300 transition hover:border-neutral-800 hover:bg-neutral-900"
-                onClick={() => {
-                  if (!liveRun?.busy) {
-                    void handleSubmit(question);
-                  }
-                }}
-                type="button"
-              >
-                {question}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="mt-auto rounded-[1.75rem] border border-neutral-900 bg-neutral-900/70 p-4">
+        <section className="mt-6 shrink-0 rounded-[1.5rem] border border-neutral-900 bg-neutral-900/80 p-4">
           <div className="flex items-center justify-between">
             <div className="text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
               Usage
@@ -332,15 +369,15 @@ export default function App() {
           </div>
 
           <div className="mt-4 space-y-3 text-sm">
-            <div className="flex items-center justify-between rounded-2xl bg-neutral-950/80 px-3 py-3">
+            <div className="flex items-center justify-between rounded-xl border border-neutral-900 bg-neutral-950/70 px-3 py-3">
               <span className="text-neutral-500">LLM requests</span>
               <strong>{usage?.llm_requests ?? 0}</strong>
             </div>
-            <div className="flex items-center justify-between rounded-2xl bg-neutral-950/80 px-3 py-3">
+            <div className="flex items-center justify-between rounded-xl border border-neutral-900 bg-neutral-950/70 px-3 py-3">
               <span className="text-neutral-500">Warehouse queries</span>
               <strong>{usage?.clickhouse_queries ?? 0}</strong>
             </div>
-            <div className="flex items-center justify-between rounded-2xl bg-neutral-950/80 px-3 py-3">
+            <div className="flex items-center justify-between rounded-xl border border-neutral-900 bg-neutral-950/70 px-3 py-3">
               <span className="text-neutral-500">Estimated cost</span>
               <strong>${(usage?.estimated_cost_usd ?? 0).toFixed(2)}</strong>
             </div>
@@ -355,14 +392,14 @@ export default function App() {
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               <button
-                className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800"
+                className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-900"
                 onClick={handleUpgrade}
                 type="button"
               >
                 Upgrade
               </button>
               <button
-                className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800"
+                className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-900"
                 onClick={handleManageBilling}
                 type="button"
               >
@@ -370,7 +407,7 @@ export default function App() {
               </button>
               {!appConfig.enableDevAuth ? (
                 <button
-                  className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800"
+                  className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-900"
                   onClick={auth.signOut}
                   type="button"
                 >
@@ -383,8 +420,8 @@ export default function App() {
         </section>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="border-b border-neutral-900 px-4 py-4 sm:px-6">
+      <section className="flex min-w-0 flex-1 flex-col bg-neutral-900">
+        <header className="border-b border-neutral-800 bg-neutral-900 px-4 py-4 sm:px-6">
           <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4">
             <div>
               <div className="text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
@@ -409,7 +446,7 @@ export default function App() {
           <div ref={scrollAnchorRef} />
         </div>
 
-        <div className="border-t border-neutral-900 bg-gradient-to-t from-neutral-950 via-neutral-950 to-neutral-950/95 px-4 py-4 sm:px-6">
+        <div className="border-t border-neutral-800 bg-gradient-to-t from-neutral-900 via-neutral-900 to-neutral-900/95 px-4 py-4 sm:px-6">
           <Composer disabled={Boolean(liveRun?.busy)} onSubmit={handleSubmit} />
         </div>
       </section>

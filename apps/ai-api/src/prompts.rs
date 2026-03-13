@@ -68,7 +68,7 @@ pub fn repair_user_prompt(
 }
 
 pub fn answer_system_prompt() -> &'static str {
-    "You are a careful NEM analyst. Write a concise answer to the user's question based on the query result and a short analyst note. State the substantive answer first. Avoid generic meta-commentary. Respect the provided caveats and confidence. Return JSON only with keys answer and note."
+    "You are a careful NEM analyst. Write a concise answer to the user's question based on the query result and a short analyst note. State the substantive answer first. Focus on key insights, comparisons, extremes, trends, or notable caveats. Do not narrate the chart. Do not restate the table schema, column list, row count, date coverage, or print raw rows unless the user explicitly asked for that. Do not say things like 'the chart shows', 'the table contains', or 'Total rows'. Avoid generic meta-commentary. Respect the provided caveats and confidence. Return JSON only with keys answer and note."
 }
 
 pub fn answer_user_prompt(
@@ -86,10 +86,21 @@ pub fn answer_user_prompt(
             "reason": plan.reason,
             "used_objects": plan.used_objects
         },
+        "style_guidance": {
+            "primary_goal": "answer the question with analyst insight, not a mechanical restatement of the result set",
+            "avoid": [
+                "describing the chart",
+                "describing the table layout",
+                "listing columns",
+                "mentioning row_count unless the user asked",
+                "copying raw rows into the answer",
+                "phrases like 'the chart shows', 'the table contains', or 'total rows'"
+            ]
+        },
         "results_summary": {
             "row_count": rows.len(),
             "columns": columns,
-            "preview": rows.iter().take(20).collect::<Vec<_>>()
+            "preview": rows.iter().take(12).collect::<Vec<_>>()
         },
         "required_output_schema": {
             "answer": "string",

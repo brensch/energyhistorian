@@ -70,6 +70,8 @@ export function ChartPanel({ chart, preview }: ChartPanelProps) {
 
   const frame = rowsToObjects(preview);
   const traces = buildTraces(frame, chart);
+  const xAxisTitle = axisTitle(chart.x, preview);
+  const yAxisTitle = yAxisTitleFor(chart.y, preview);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-950/70 p-3">
@@ -88,11 +90,19 @@ export function ChartPanel({ chart, preview }: ChartPanelProps) {
           margin: { t: 56, r: 24, b: 44, l: 52 },
           font: { family: 'Space Grotesk, sans-serif', color: '#d4d4d4' },
           xaxis: {
+            title: {
+              text: xAxisTitle,
+              font: { color: '#a3a3a3', size: 12 },
+            },
             gridcolor: 'rgba(64,64,64,0.45)',
             zerolinecolor: 'rgba(64,64,64,0.45)',
             linecolor: 'rgba(82,82,82,0.7)',
           },
           yaxis: {
+            title: {
+              text: yAxisTitle,
+              font: { color: '#a3a3a3', size: 12 },
+            },
             gridcolor: 'rgba(64,64,64,0.45)',
             zerolinecolor: 'rgba(64,64,64,0.45)',
             linecolor: 'rgba(82,82,82,0.7)',
@@ -125,7 +135,16 @@ function buildTraces(frame: Array<Record<string, unknown>>, chart: ChartSpec) {
   const xKey = chart.x!;
   const yKeys = chart.y;
   const colorKey = chart.color;
-  const palette = ['#fafafa', '#d4d4d4', '#a3a3a3', '#737373'];
+  const palette = [
+    '#60a5fa',
+    '#f59e0b',
+    '#34d399',
+    '#f472b6',
+    '#a78bfa',
+    '#f87171',
+    '#22d3ee',
+    '#84cc16',
+  ];
 
   if (!colorKey) {
     return yKeys.map((yKey, index) => ({
@@ -159,6 +178,79 @@ function buildTraces(frame: Array<Record<string, unknown>>, chart: ChartSpec) {
       line: { color: palette[(groupIndex + yIndex) % palette.length], width: 2.5 },
     })),
   );
+}
+
+function axisTitle(key: string | null, preview: QueryPreview) {
+  if (!key) {
+    return '';
+  }
+  const unit = inferUnit(key);
+  const isDatetime = isTimeishKey(key) || columnValuesLookLikeDatetimes(preview, key);
+  if (isDatetime) {
+    return `${prettify(key)} (UTC)`;
+  }
+  return unit ? `${prettify(key)} (${unit})` : prettify(key);
+}
+
+function yAxisTitleFor(keys: string[], preview: QueryPreview) {
+  if (keys.length === 0) {
+    return '';
+  }
+  const units = Array.from(
+    new Set(keys.map(inferUnit).filter((value): value is string => value !== null)),
+  );
+  if (units.length === 1) {
+    return units[0];
+  }
+  if (keys.length === 1) {
+    return axisTitle(keys[0], preview);
+  }
+  return 'Value';
+}
+
+function inferUnit(key: string): string | null {
+  const lowered = key.toLowerCase();
+  if (
+    lowered.includes('rrp') ||
+    lowered.includes('rop') ||
+    lowered.includes('eep') ||
+    lowered.includes('price') ||
+    lowered.includes('marginalvalue')
+  ) {
+    return 'AUD/MWh';
+  }
+  if (lowered.includes('demand') || lowered.includes('mw') || lowered.includes('flow')) {
+    return 'MW';
+  }
+  if (lowered.includes('mwh') || lowered.includes('energy')) {
+    return 'MWh';
+  }
+  if (lowered.includes('percent') || lowered.endsWith('pct')) {
+    return '%';
+  }
+  return null;
+}
+
+function isTimeishKey(key: string) {
+  const lowered = key.toLowerCase();
+  return (
+    lowered.includes('date') ||
+    lowered.includes('time') ||
+    lowered.includes('interval')
+  );
+}
+
+function columnValuesLookLikeDatetimes(preview: QueryPreview, column: string) {
+  const index = preview.columns.indexOf(column);
+  if (index < 0) {
+    return false;
+  }
+  return preview.rows
+    .slice(0, 5)
+    .every((row) => {
+      const value = row[index];
+      return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+    });
 }
 
 function prettify(value: string) {
