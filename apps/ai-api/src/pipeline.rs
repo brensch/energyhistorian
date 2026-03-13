@@ -261,7 +261,21 @@ pub async fn execute_chat(
         return Ok(());
     };
 
-    let chart = build_chart_spec(&preview, &plan.chart_title);
+    emit_status(&sender, "chart", "Shaping chart").await;
+    let chart = match plan_chart(
+        &state,
+        &user,
+        &request.question,
+        &plan,
+        &preview,
+        &prompt_context,
+        run_id,
+    )
+    .await
+    {
+        Ok(chart) if validate_chart_spec(&chart, &preview).is_ok() => chart,
+        _ => build_chart_spec(&preview, &plan.chart_title),
+    };
     emit(
         &sender,
         StreamPayload::QueryPreview {
@@ -376,6 +390,32 @@ async fn refine_answer(
         .await?;
     log_llm_usage(state, user, run_id, "answer", &response).await?;
     Ok(extract_json::<FinalAnswer>(&response.text)?)
+}
+
+async fn plan_chart(
+    state: &AppState,
+    user: &AuthUser,
+    question: &str,
+    plan: &Plan,
+    preview: &QueryPreview,
+    thread_context: &Value,
+    run_id: Uuid,
+) -> Result<ChartSpec> {
+    let response = state
+        .llm
+        .json_completion(
+            prompts::chart_system_prompt(),
+            &prompts::chart_user_prompt(
+                question,
+                plan,
+                &preview.columns,
+                &preview.rows,
+                thread_context,
+            ),
+        )
+        .await?;
+    log_llm_usage(state, user, run_id, "chart", &response).await?;
+    Ok(extract_json::<ChartSpec>(&response.text)?)
 }
 
 async fn log_llm_usage(
@@ -714,23 +754,86 @@ fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
             "line",
             x,
             y,
-            categorical.first().cloned(),
+            choose_color_category(preview, &categorical, None),
+            false,
             false,
         );
     }
     if !categorical.is_empty() && !numeric.is_empty() {
+        let primary = choose_primary_category(&categorical);
+        let color = choose_color_category(preview, &categorical, Some(&primary));
+        let horizontal = should_use_horizontal_ranking(preview, &primary);
         return build_vega_lite_chart(
             preview,
             title,
             "bar",
-            categorical[0].clone(),
+            primary,
             vec![numeric[0].clone()],
-            categorical.get(1).cloned(),
+            color,
             false,
+            horizontal,
         );
     }
     ChartSpec::Table {
         title: title.to_string(),
+    }
+}
+
+fn validate_chart_spec(chart: &ChartSpec, preview: &QueryPreview) -> Result<()> {
+    match chart {
+        ChartSpec::Summary { .. } | ChartSpec::Table { .. } => Ok(()),
+        ChartSpec::VegaLite { spec, .. } => {
+            let mut fields = Vec::new();
+            collect_chart_fields(spec, &mut fields)?;
+            let allowed = preview
+                .columns
+                .iter()
+                .cloned()
+                .chain(["value".to_string(), "series".to_string()])
+                .collect::<HashSet<_>>();
+            let invalid = fields
+                .into_iter()
+                .filter(|field| !allowed.contains(field))
+                .collect::<Vec<_>>();
+            if !invalid.is_empty() {
+                bail!("chart referenced unknown fields: {}", invalid.join(", "));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_chart_fields(value: &Value, fields: &mut Vec<String>) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if key == "field" {
+                    if let Some(field) = child.as_str() {
+                        fields.push(field.to_string());
+                    }
+                } else if key == "fold" {
+                    let Some(items) = child.as_array() else {
+                        bail!("chart transform.fold must be an array");
+                    };
+                    for item in items {
+                        let Some(field) = item.as_str() else {
+                            bail!("chart transform.fold entries must be strings");
+                        };
+                        fields.push(field.to_string());
+                    }
+                } else {
+                    collect_chart_fields(child, fields)?;
+                }
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_chart_fields(item, fields)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -742,8 +845,18 @@ fn build_vega_lite_chart(
     y: Vec<String>,
     color: Option<String>,
     stacked: bool,
+    horizontal: bool,
 ) -> ChartSpec {
-    let spec = build_vega_lite_spec(preview, title, mark_type, &x, &y, color.as_deref(), stacked);
+    let spec = build_vega_lite_spec(
+        preview,
+        title,
+        mark_type,
+        &x,
+        &y,
+        color.as_deref(),
+        stacked,
+        horizontal,
+    );
     ChartSpec::VegaLite {
         title: title.to_string(),
         spec,
@@ -758,16 +871,9 @@ fn build_vega_lite_spec(
     y: &[String],
     color: Option<&str>,
     stacked: bool,
+    horizontal: bool,
 ) -> Value {
     let mut encoding = serde_json::Map::new();
-    encoding.insert(
-        "x".to_string(),
-        json!({
-            "field": x,
-            "type": vega_field_type(preview, x),
-            "title": axis_title_for_column(preview, x),
-        }),
-    );
 
     let mut transforms = Vec::new();
     let y_field = if y.len() > 1 {
@@ -784,15 +890,44 @@ fn build_vega_lite_spec(
     } else {
         axis_title_for_column(preview, &y_field)
     };
-    encoding.insert(
-        "y".to_string(),
-        json!({
-            "field": y_field,
-            "type": "quantitative",
-            "title": y_title,
-            "stack": if mark_type == "bar" && stacked { json!("zero") } else { Value::Null },
-        }),
-    );
+    if horizontal {
+        encoding.insert(
+            "x".to_string(),
+            json!({
+                "field": y_field,
+                "type": "quantitative",
+                "title": y_title,
+                "stack": if mark_type == "bar" && stacked { json!("zero") } else { Value::Null },
+            }),
+        );
+        encoding.insert(
+            "y".to_string(),
+            json!({
+                "field": x,
+                "type": vega_field_type(preview, x),
+                "title": axis_title_for_column(preview, x),
+                "sort": { "field": y_field, "order": "descending" },
+            }),
+        );
+    } else {
+        encoding.insert(
+            "x".to_string(),
+            json!({
+                "field": x,
+                "type": vega_field_type(preview, x),
+                "title": axis_title_for_column(preview, x),
+            }),
+        );
+        encoding.insert(
+            "y".to_string(),
+            json!({
+                "field": y_field,
+                "type": "quantitative",
+                "title": y_title,
+                "stack": if mark_type == "bar" && stacked { json!("zero") } else { Value::Null },
+            }),
+        );
+    }
 
     let color_field = if y.len() > 1 {
         Some("series".to_string())
@@ -982,6 +1117,7 @@ fn restyle_chart_as_stacked_bar(preview: &QueryPreview, chart: ChartSpec) -> Opt
                 &y,
                 color.as_deref(),
                 true,
+                false,
             );
             Some(ChartSpec::VegaLite {
                 title: format!("{title} (Stacked)"),
@@ -1003,6 +1139,7 @@ fn restyle_chart_as_stacked_bar(preview: &QueryPreview, chart: ChartSpec) -> Opt
                 y,
                 color,
                 true,
+                false,
             ))
         }
     }
@@ -1090,6 +1227,79 @@ fn infer_chart_color(preview: &QueryPreview, x: &str, y: &[String]) -> Option<St
                 && !column_values_look_numeric(preview, column)
         })
         .cloned()
+}
+
+fn choose_primary_category(categorical: &[String]) -> String {
+    categorical
+        .iter()
+        .find(|column| looks_like_name(column))
+        .cloned()
+        .or_else(|| {
+            categorical
+                .iter()
+                .find(|column| !looks_like_identifier(column))
+                .cloned()
+        })
+        .unwrap_or_else(|| categorical[0].clone())
+}
+
+fn choose_color_category(
+    preview: &QueryPreview,
+    categorical: &[String],
+    primary: Option<&str>,
+) -> Option<String> {
+    let preferred = ["REGIONID", "FUEL_TYPE", "PARTICIPANTID"];
+    preferred
+        .iter()
+        .find_map(|wanted| {
+            categorical.iter().find(|column| {
+                column.as_str() != primary.unwrap_or_default()
+                    && column.as_str() == *wanted
+                    && color_cardinality_is_reasonable(preview, column)
+            })
+        })
+        .cloned()
+        .or_else(|| {
+            categorical
+                .iter()
+                .find(|column| {
+                    column.as_str() != primary.unwrap_or_default()
+                        && !looks_like_name(column)
+                        && color_cardinality_is_reasonable(preview, column)
+                })
+                .cloned()
+        })
+}
+
+fn should_use_horizontal_ranking(preview: &QueryPreview, category: &str) -> bool {
+    let cardinality = column_cardinality(preview, category);
+    cardinality >= 8 || cardinality.saturating_mul(2) >= preview.row_count
+}
+
+fn color_cardinality_is_reasonable(preview: &QueryPreview, column: &str) -> bool {
+    let cardinality = column_cardinality(preview, column);
+    (2..=8).contains(&cardinality)
+}
+
+fn column_cardinality(preview: &QueryPreview, column: &str) -> usize {
+    let Some(idx) = preview.columns.iter().position(|item| item == column) else {
+        return 0;
+    };
+    let mut seen = HashSet::new();
+    for row in &preview.rows {
+        if let Some(value) = row.get(idx) {
+            seen.insert(value.to_string());
+        }
+    }
+    seen.len()
+}
+
+fn looks_like_identifier(column: &str) -> bool {
+    matches!(column, "DUID" | "PARTICIPANTID" | "REGIONID") || column.ends_with("ID")
+}
+
+fn looks_like_name(column: &str) -> bool {
+    column.contains("NAME") || column.ends_with("NAME")
 }
 
 fn vega_field_type(preview: &QueryPreview, column: &str) -> &'static str {
