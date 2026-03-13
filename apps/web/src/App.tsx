@@ -14,7 +14,13 @@ import { appConfig } from './config';
 import { Composer } from './components/Composer';
 import { ConversationList } from './components/ConversationList';
 import { MessageThread, type LiveRunState } from './components/MessageThread';
-import type { ConversationSummary, MeResponse, MessageRecord, UsageSnapshot } from './types';
+import type {
+  ConversationSummary,
+  MeResponse,
+  MessageRecord,
+  ThreadContextMessage,
+  UsageSnapshot,
+} from './types';
 
 const SUGGESTED_QUESTIONS = [
   'What was the average NSW1 spot price over the last 7 days?',
@@ -156,6 +162,7 @@ export default function App() {
       return;
     }
     setSidebarError(null);
+    const threadContext = messages.slice(-8).map(messageToThreadContext);
     const optimisticUserMessage: MessageRecord = {
       id: `optimistic-${Date.now()}`,
       run_id: null,
@@ -184,6 +191,7 @@ export default function App() {
           question,
           conversation_id: activeConversationId,
           approved_proposal: null,
+          thread_context: threadContext,
         },
         (message) => {
           setLiveRun((current) => {
@@ -452,4 +460,20 @@ export default function App() {
       </section>
     </main>
   );
+}
+
+function messageToThreadContext(message: MessageRecord): ThreadContextMessage {
+  return {
+    role: message.role,
+    content: message.content,
+    sql_text: message.sql_text,
+    metadata: {
+      sql: message.metadata?.sql ?? null,
+      used_objects: message.metadata?.used_objects ?? [],
+      chart: message.metadata?.chart ?? null,
+      preview: message.metadata?.preview ?? null,
+      note: message.metadata?.note ?? null,
+      confidence: message.metadata?.confidence ?? null,
+    },
+  };
 }

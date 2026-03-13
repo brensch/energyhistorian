@@ -185,8 +185,10 @@ impl NemwebPlugin {
                 &["DUID"],
                 &["MWH_READING"],
                 &["semantic.unit_dimension on DUID"],
-                &["Best actual-generation surface for output and generation mix questions."],
-                &["generation", "actual", "fuel", "duid", "mix"],
+                &[
+                    "Partial metered surface that is useful for DUID-specific actual-output questions, but not reliable for whole-of-market fuel-mix breakdowns.",
+                ],
+                &["generation", "actual", "duid", "metered"],
             ),
             semantic_model(
                 "aemo.nemweb",

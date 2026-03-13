@@ -1,14 +1,17 @@
 use chrono::Utc;
 
+use serde_json::Value;
+
 use crate::models::{Plan, SemanticObject};
 
 pub const REGION_ALIAS_GUIDANCE: &str = "Canonical NEM region IDs are NSW1, QLD1, VIC1, SA1, TAS1, and SNOWY1. Normalize natural-language region names before writing SQL. Do not use VIC, NSW, QLD, SA, or TAS in REGIONID filters.";
 
 pub const PHYSICAL_FUEL_BLOCK_GUIDANCE: &str = "Do not answer questions about physical fuel consumed, gas used, coal burned, stockpiles, or inventories with dispatch or generation proxies. Block those unless the registry explicitly includes that physical dataset.";
+pub const FUEL_MIX_SURFACE_GUIDANCE: &str = "For whole-of-market or region-wide generation breakdowns by fuel type, do not use semantic.actual_gen_duid because it has partial metered coverage and can badly undercount major fuels. Prefer semantic.daily_unit_dispatch joined to semantic.unit_dimension and use TOTALCLEARED * 0.5 as a dispatch-energy proxy, clearly noting that it is a dispatch proxy rather than metered generation. Use semantic.actual_gen_duid only for DUID-specific actual-output questions or questions explicitly about that metered surface.";
 
 pub fn planner_system_prompt() -> String {
     format!(
-        "You are a careful NEM analytics planner. You must decide whether the user's question can be answered from the provided semantic registry. If answerable, write one read-only ClickHouse SQL query using only semantic.* objects from the registry. If not answerable, return blocked with an empty SQL string. Prefer concise SQL with explicit grouping and limits. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} Return JSON only."
+        "You are a careful NEM analytics planner. You must decide whether the user's question can be answered from the provided semantic registry. If answerable, write one read-only ClickHouse SQL query using only semantic.* objects from the registry. If not answerable, return blocked with an empty SQL string. Prefer concise SQL with explicit grouping and limits. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} {FUEL_MIX_SURFACE_GUIDANCE} Return JSON only."
     )
 }
 
@@ -16,10 +19,12 @@ pub fn planner_user_prompt(
     question: &str,
     registry: &[SemanticObject],
     approved: Option<&str>,
+    thread_context: &Value,
 ) -> String {
     let payload = serde_json::json!({
         "question": question,
         "approved_visualization_plan": approved,
+        "thread_context": thread_context,
         "today": Utc::now().date_naive().to_string(),
         "required_output_schema": {
             "status": "answerable|blocked",
@@ -38,7 +43,7 @@ pub fn planner_user_prompt(
 
 pub fn repair_system_prompt() -> String {
     format!(
-        "You are repairing a failed ClickHouse SQL plan for Australia's National Electricity Market. Keep the same JSON schema as before. Only use semantic.* objects from the registry. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} If the question cannot be answered cleanly, return blocked. Return JSON only."
+        "You are repairing a failed ClickHouse SQL plan for Australia's National Electricity Market. Keep the same JSON schema as before. Only use semantic.* objects from the registry. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} {FUEL_MIX_SURFACE_GUIDANCE} If the question cannot be answered cleanly, return blocked. Return JSON only."
     )
 }
 
@@ -47,9 +52,11 @@ pub fn repair_user_prompt(
     registry: &[SemanticObject],
     plan: &Plan,
     error: &str,
+    thread_context: &Value,
 ) -> String {
     let payload = serde_json::json!({
         "question": question,
+        "thread_context": thread_context,
         "failing_plan": plan,
         "error": error,
         "semantic_registry": registry,
@@ -76,9 +83,11 @@ pub fn answer_user_prompt(
     plan: &Plan,
     columns: &[String],
     rows: &[Vec<serde_json::Value>],
+    thread_context: &Value,
 ) -> String {
     let payload = serde_json::json!({
         "question": question,
+        "thread_context": thread_context,
         "plan": {
             "data_description": plan.data_description,
             "note": plan.note,

@@ -53,13 +53,10 @@ export interface Plan {
   reason: string;
 }
 
-export interface ChartSpec {
-  kind: string;
-  x: string | null;
-  y: string[];
-  color: string | null;
-  title: string;
-}
+export type ChartSpec =
+  | { renderer: 'summary'; title: string }
+  | { renderer: 'table'; title: string }
+  | { renderer: 'vega_lite'; title: string; spec: Record<string, unknown> };
 
 export interface QueryPreview {
   columns: string[];
@@ -95,4 +92,12 @@ export interface ChatRequest {
   question: string;
   conversation_id: string | null;
   approved_proposal: string | null;
+  thread_context: ThreadContextMessage[];
+}
+
+export interface ThreadContextMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  sql_text: string | null;
+  metadata: AssistantMessageMetadata;
 }

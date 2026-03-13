@@ -43,12 +43,11 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChartSpec {
-    pub kind: String,
-    pub x: Option<String>,
-    pub y: Vec<String>,
-    pub color: Option<String>,
-    pub title: String,
+#[serde(tag = "renderer", rename_all = "snake_case")]
+pub enum ChartSpec {
+    Summary { title: String },
+    Table { title: String },
+    VegaLite { title: String, spec: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +68,18 @@ pub struct ChatRequest {
     pub question: String,
     pub conversation_id: Option<Uuid>,
     pub approved_proposal: Option<String>,
+    #[serde(default)]
+    pub thread_context: Vec<ThreadContextMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadContextMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(default)]
+    pub sql_text: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]

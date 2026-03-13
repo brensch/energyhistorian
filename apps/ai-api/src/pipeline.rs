@@ -11,7 +11,7 @@ use crate::{
     llm::{CompletionResponse, estimate_cost_usd, extract_json},
     models::{
         AuthUser, ChartSpec, ChatRequest, FinalAnswer, Plan, QueryPreview, SemanticObject,
-        StreamPayload,
+        StreamPayload, ThreadContextMessage,
     },
     prompts,
     state::AppState,
@@ -26,6 +26,7 @@ pub async fn execute_chat(
     sender: mpsc::Sender<StreamPayload>,
 ) -> Result<()> {
     state.store.sync_user(&user).await?;
+    let prompt_context = compact_thread_context(&request.thread_context);
 
     let conversation = state
         .store
@@ -64,6 +65,53 @@ pub async fn execute_chat(
         )
         .await?;
 
+    if let Some((plan, answer, chart, preview)) =
+        maybe_build_visualization_follow_up(&request.question, &request.thread_context)
+    {
+        emit_status(
+            &sender,
+            "chart",
+            "Reusing the previous result from this thread",
+        )
+        .await;
+        emit(&sender, StreamPayload::Plan { plan: plan.clone() }).await;
+        emit(
+            &sender,
+            StreamPayload::QueryPreview {
+                preview: preview.clone(),
+                chart: chart.clone(),
+            },
+        )
+        .await;
+        state
+            .store
+            .append_message(
+                conversation.id,
+                &user.org_id,
+                &user.id,
+                Some(run_id),
+                "assistant",
+                &answer.answer,
+                None,
+                Store::assistant_metadata(
+                    None,
+                    &plan.used_objects,
+                    Some(&chart),
+                    Some(&preview),
+                    Some(&answer.note),
+                    Some(&plan.confidence),
+                ),
+            )
+            .await?;
+        state
+            .store
+            .finish_run(run_id, "completed", None, None)
+            .await?;
+        emit(&sender, StreamPayload::Answer { answer }).await;
+        emit(&sender, StreamPayload::Completed { run_id }).await;
+        return Ok(());
+    }
+
     emit_status(&sender, "registry", "Loading semantic registry").await;
     let registry = state.clickhouse.load_registry().await?;
     if registry.is_empty() {
@@ -79,10 +127,20 @@ pub async fn execute_chat(
             &request.question,
             &registry,
             request.approved_proposal.as_deref(),
+            &prompt_context,
             run_id,
         )
         .await?,
     );
+    plan = maybe_redirect_partial_actual_generation_plan(
+        &state,
+        &user,
+        &request.question,
+        &registry,
+        plan,
+        run_id,
+    )
+    .await?;
 
     emit(&sender, StreamPayload::Plan { plan: plan.clone() }).await;
 
@@ -167,10 +225,20 @@ pub async fn execute_chat(
                 &registry,
                 &plan,
                 last_error.as_deref().unwrap_or("unknown error"),
+                &prompt_context,
                 run_id,
             )
             .await?,
         );
+        plan = maybe_redirect_partial_actual_generation_plan(
+            &state,
+            &user,
+            &request.question,
+            &registry,
+            plan,
+            run_id,
+        )
+        .await?;
         emit(&sender, StreamPayload::Plan { plan: plan.clone() }).await;
         if plan.status != "answerable" || plan.sql.trim().is_empty() {
             break;
@@ -204,7 +272,16 @@ pub async fn execute_chat(
     .await;
 
     emit_status(&sender, "answer", "Writing answer").await;
-    let answer = refine_answer(&state, &user, &request.question, &plan, &preview, run_id).await?;
+    let answer = refine_answer(
+        &state,
+        &user,
+        &request.question,
+        &plan,
+        &preview,
+        &prompt_context,
+        run_id,
+    )
+    .await?;
     state
         .store
         .append_message(
@@ -240,13 +317,14 @@ async fn plan_question(
     question: &str,
     registry: &[SemanticObject],
     approved_proposal: Option<&str>,
+    thread_context: &Value,
     run_id: Uuid,
 ) -> Result<Plan> {
     let response = state
         .llm
         .json_completion(
             &prompts::planner_system_prompt(),
-            &prompts::planner_user_prompt(question, registry, approved_proposal),
+            &prompts::planner_user_prompt(question, registry, approved_proposal, thread_context),
         )
         .await?;
     log_llm_usage(state, user, run_id, "planner", &response).await?;
@@ -260,13 +338,14 @@ async fn repair_plan(
     registry: &[SemanticObject],
     plan: &Plan,
     error: &str,
+    thread_context: &Value,
     run_id: Uuid,
 ) -> Result<Plan> {
     let response = state
         .llm
         .json_completion(
             &prompts::repair_system_prompt(),
-            &prompts::repair_user_prompt(question, registry, plan, error),
+            &prompts::repair_user_prompt(question, registry, plan, error, thread_context),
         )
         .await?;
     log_llm_usage(state, user, run_id, "repair", &response).await?;
@@ -279,13 +358,20 @@ async fn refine_answer(
     question: &str,
     plan: &Plan,
     preview: &QueryPreview,
+    thread_context: &Value,
     run_id: Uuid,
 ) -> Result<FinalAnswer> {
     let response = state
         .llm
         .json_completion(
             prompts::answer_system_prompt(),
-            &prompts::answer_user_prompt(question, plan, &preview.columns, &preview.rows),
+            &prompts::answer_user_prompt(
+                question,
+                plan,
+                &preview.columns,
+                &preview.rows,
+                thread_context,
+            ),
         )
         .await?;
     log_llm_usage(state, user, run_id, "answer", &response).await?;
@@ -415,6 +501,49 @@ async fn run_validated_query(
     preview_result
 }
 
+async fn maybe_redirect_partial_actual_generation_plan(
+    state: &AppState,
+    user: &AuthUser,
+    question: &str,
+    registry: &[SemanticObject],
+    plan: Plan,
+    run_id: Uuid,
+) -> Result<Plan> {
+    if !question_requests_generation_mix(question) || !plan_uses_actual_gen_duid(&plan) {
+        return Ok(plan);
+    }
+
+    let repaired = enforce_semantic_contract(
+        question,
+        repair_plan(
+            state,
+            user,
+            question,
+            registry,
+            &plan,
+            "semantic.actual_gen_duid has partial DUID coverage and is not suitable for whole-of-market or broad fuel-mix breakdowns. Use semantic.daily_unit_dispatch joined to semantic.unit_dimension, and if needed convert TOTALCLEARED to dispatch-energy with * 0.5 while clearly noting it is a dispatch proxy rather than metered generation.",
+            &serde_json::json!({}),
+            run_id,
+        )
+        .await?,
+    );
+
+    if plan_uses_actual_gen_duid(&repaired) {
+        return Ok(Plan {
+            status: "blocked".to_string(),
+            sql: String::new(),
+            used_objects: repaired.used_objects,
+            data_description: "The metered actual-generation surface currently available in the warehouse has partial DUID coverage and is not reliable for whole-of-market fuel-mix breakdowns.".to_string(),
+            note: "Blocked because the current plan still relied on a partial actual-generation surface that would materially undercount major fuels. Use the dispatch surface instead for a proxy answer, or add a fuller metered-generation dataset.".to_string(),
+            chart_title: repaired.chart_title,
+            confidence: "low".to_string(),
+            reason: "semantic.actual_gen_duid is unsuitable for broad fuel-mix breakdowns because its coverage is partial.".to_string(),
+        });
+    }
+
+    Ok(repaired)
+}
+
 fn validate_sql(sql: &str, allowed_objects: &HashSet<String>) -> Result<String> {
     let sql = sql.trim().trim_end_matches(';').to_string();
     let lowered = sql.to_ascii_lowercase();
@@ -509,13 +638,49 @@ fn question_requests_physical_consumption(question: &str) -> bool {
     .any(|pattern| lowered.contains(pattern))
 }
 
+fn question_requests_generation_mix(question: &str) -> bool {
+    let lowered = question.to_ascii_lowercase();
+    let has_fuel = lowered.contains("fuel");
+    let has_mix_shape = [
+        "mix",
+        "breakdown",
+        "by fuel",
+        "fuel type",
+        "source",
+        "generation by",
+        "each day",
+        "per day",
+        "daily",
+    ]
+    .iter()
+    .any(|pattern| lowered.contains(pattern));
+    let whole_market_shape = [
+        "nem",
+        "market",
+        "last week",
+        "this week",
+        "yesterday",
+        "today",
+        "each day",
+        "per day",
+        "daily",
+        "show me",
+    ]
+    .iter()
+    .any(|pattern| lowered.contains(pattern));
+
+    (has_fuel && has_mix_shape) || (has_fuel && whole_market_shape)
+}
+
+fn plan_uses_actual_gen_duid(plan: &Plan) -> bool {
+    plan.used_objects
+        .iter()
+        .any(|item| item == "semantic.actual_gen_duid")
+}
+
 fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
     if preview.row_count <= 1 {
-        return ChartSpec {
-            kind: "summary".to_string(),
-            x: None,
-            y: Vec::new(),
-            color: None,
+        return ChartSpec::Summary {
             title: title.to_string(),
         };
     }
@@ -541,30 +706,448 @@ fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
         .collect::<Vec<_>>();
 
     if let Some(idx) = datetime_idx {
-        return ChartSpec {
-            kind: "line".to_string(),
-            x: Some(preview.columns[idx].clone()),
-            y: numeric.into_iter().take(2).collect(),
-            color: categorical.first().cloned(),
-            title: title.to_string(),
-        };
+        let x = preview.columns[idx].clone();
+        let y = numeric.into_iter().take(2).collect::<Vec<_>>();
+        return build_vega_lite_chart(
+            preview,
+            title,
+            "line",
+            x,
+            y,
+            categorical.first().cloned(),
+            false,
+        );
     }
     if !categorical.is_empty() && !numeric.is_empty() {
-        return ChartSpec {
-            kind: "bar".to_string(),
-            x: categorical.first().cloned(),
-            y: vec![numeric[0].clone()],
-            color: categorical.get(1).cloned(),
-            title: title.to_string(),
-        };
+        return build_vega_lite_chart(
+            preview,
+            title,
+            "bar",
+            categorical[0].clone(),
+            vec![numeric[0].clone()],
+            categorical.get(1).cloned(),
+            false,
+        );
     }
-    ChartSpec {
-        kind: "table".to_string(),
-        x: None,
-        y: Vec::new(),
-        color: None,
+    ChartSpec::Table {
         title: title.to_string(),
     }
+}
+
+fn build_vega_lite_chart(
+    preview: &QueryPreview,
+    title: &str,
+    mark_type: &str,
+    x: String,
+    y: Vec<String>,
+    color: Option<String>,
+    stacked: bool,
+) -> ChartSpec {
+    let spec = build_vega_lite_spec(preview, title, mark_type, &x, &y, color.as_deref(), stacked);
+    ChartSpec::VegaLite {
+        title: title.to_string(),
+        spec,
+    }
+}
+
+fn build_vega_lite_spec(
+    preview: &QueryPreview,
+    title: &str,
+    mark_type: &str,
+    x: &str,
+    y: &[String],
+    color: Option<&str>,
+    stacked: bool,
+) -> Value {
+    let mut encoding = serde_json::Map::new();
+    encoding.insert(
+        "x".to_string(),
+        json!({
+            "field": x,
+            "type": vega_field_type(preview, x),
+            "title": axis_title_for_column(preview, x),
+        }),
+    );
+
+    let mut transforms = Vec::new();
+    let y_field = if y.len() > 1 {
+        transforms.push(json!({
+            "fold": y,
+            "as": ["series", "value"]
+        }));
+        "value".to_string()
+    } else {
+        y.first().cloned().unwrap_or_else(|| "value".to_string())
+    };
+    let y_title = if y.len() > 1 {
+        "Value".to_string()
+    } else {
+        axis_title_for_column(preview, &y_field)
+    };
+    encoding.insert(
+        "y".to_string(),
+        json!({
+            "field": y_field,
+            "type": "quantitative",
+            "title": y_title,
+            "stack": if mark_type == "bar" && stacked { json!("zero") } else { Value::Null },
+        }),
+    );
+
+    let color_field = if y.len() > 1 {
+        Some("series".to_string())
+    } else {
+        color.map(|value| value.to_string())
+    };
+    if let Some(field) = color_field {
+        let title = prettify_column(&field);
+        encoding.insert(
+            "color".to_string(),
+            json!({
+                "field": field,
+                "type": "nominal",
+                "title": title,
+                "scale": {
+                    "range": ["#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#f87171", "#22d3ee", "#84cc16"]
+                }
+            }),
+        );
+    }
+    encoding.insert(
+        "tooltip".to_string(),
+        json!(
+            preview
+                .columns
+                .iter()
+                .map(|column| {
+                    json!({
+                        "field": column,
+                        "type": vega_field_type(preview, column),
+                        "title": axis_title_for_column(preview, column),
+                    })
+                })
+                .collect::<Vec<_>>()
+        ),
+    );
+
+    let mark = if mark_type == "line" {
+        json!({ "type": "line", "point": true, "strokeWidth": 2.5 })
+    } else {
+        json!({ "type": mark_type, "cornerRadiusTopLeft": 2, "cornerRadiusTopRight": 2 })
+    };
+
+    let mut spec = serde_json::Map::new();
+    spec.insert(
+        "$schema".to_string(),
+        json!("https://vega.github.io/schema/vega-lite/v6.json"),
+    );
+    spec.insert("title".to_string(), json!(title));
+    spec.insert("mark".to_string(), mark);
+    spec.insert("encoding".to_string(), Value::Object(encoding));
+    spec.insert("width".to_string(), json!("container"));
+    spec.insert("height".to_string(), json!(320));
+    spec.insert(
+        "config".to_string(),
+        json!({
+            "background": "transparent",
+            "view": { "stroke": null },
+            "axis": {
+                "labelColor": "#a3a3a3",
+                "titleColor": "#a3a3a3",
+                "gridColor": "rgba(64,64,64,0.45)",
+                "domainColor": "rgba(82,82,82,0.7)"
+            },
+            "legend": {
+                "labelColor": "#a3a3a3",
+                "titleColor": "#a3a3a3"
+            },
+            "title": {
+                "color": "#f5f5f5",
+                "font": "Space Grotesk, sans-serif",
+                "anchor": "start",
+                "fontSize": 16
+            }
+        }),
+    );
+    if !transforms.is_empty() {
+        spec.insert("transform".to_string(), Value::Array(transforms));
+    }
+    Value::Object(spec)
+}
+
+fn compact_thread_context(messages: &[ThreadContextMessage]) -> Value {
+    Value::Array(
+        messages
+            .iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|message| {
+                let chart = message
+                    .metadata
+                    .get("chart")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let preview = message
+                    .metadata
+                    .get("preview")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<QueryPreview>(value).ok())
+                    .map(|preview| {
+                        serde_json::json!({
+                            "columns": preview.columns,
+                            "row_count": preview.row_count,
+                            "sample_rows": preview.rows.into_iter().take(6).collect::<Vec<_>>(),
+                        })
+                    })
+                    .unwrap_or(Value::Null);
+                serde_json::json!({
+                    "role": message.role,
+                    "content": message.content,
+                    "sql_text": message.sql_text,
+                    "chart": chart,
+                    "preview": preview,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn maybe_build_visualization_follow_up(
+    question: &str,
+    messages: &[ThreadContextMessage],
+) -> Option<(Plan, FinalAnswer, ChartSpec, QueryPreview)> {
+    let follow_up = parse_chart_follow_up(question)?;
+    let prior = messages.iter().rev().find_map(extract_preview_and_chart)?;
+    let (preview, mut chart) = prior;
+
+    match follow_up {
+        ChartFollowUp::StackedBar => {
+            chart = restyle_chart_as_stacked_bar(&preview, chart)?;
+        }
+    }
+
+    let plan = Plan {
+        status: "answerable".to_string(),
+        sql: String::new(),
+        used_objects: Vec::new(),
+        data_description: "Reused the previous query result from this conversation and changed only the visualization.".to_string(),
+        note: "No new SQL was run. This chart reuses the prior result from the thread.".to_string(),
+        chart_title: chart_title(&chart).to_string(),
+        confidence: "high".to_string(),
+        reason: "The user requested a visualization change on the previous result set.".to_string(),
+    };
+    let answer = FinalAnswer {
+        answer: "Updated the previous result to a stacked bar chart.".to_string(),
+        note:
+            "Reused the prior query result from this thread without rerunning the warehouse query."
+                .to_string(),
+    };
+    Some((plan, answer, chart, preview))
+}
+
+fn extract_preview_and_chart(message: &ThreadContextMessage) -> Option<(QueryPreview, ChartSpec)> {
+    if message.role != "assistant" {
+        return None;
+    }
+    let preview =
+        serde_json::from_value::<QueryPreview>(message.metadata.get("preview")?.clone()).ok()?;
+    let chart = serde_json::from_value::<ChartSpec>(message.metadata.get("chart")?.clone()).ok()?;
+    Some((preview, chart))
+}
+
+fn restyle_chart_as_stacked_bar(preview: &QueryPreview, chart: ChartSpec) -> Option<ChartSpec> {
+    match chart {
+        ChartSpec::VegaLite { title, mut spec } => {
+            let x = vega_encoding_field(&spec, "x").or_else(|| infer_chart_x(preview))?;
+            let y = vega_encoding_field(&spec, "y")
+                .map(|field| vec![field])
+                .or_else(|| {
+                    let inferred = infer_chart_y(preview);
+                    if inferred.is_empty() {
+                        None
+                    } else {
+                        Some(inferred)
+                    }
+                })?;
+            let color =
+                vega_encoding_field(&spec, "color").or_else(|| infer_chart_color(preview, &x, &y));
+            spec = build_vega_lite_spec(
+                preview,
+                &format!("{title} (Stacked)"),
+                "bar",
+                &x,
+                &y,
+                color.as_deref(),
+                true,
+            );
+            Some(ChartSpec::VegaLite {
+                title: format!("{title} (Stacked)"),
+                spec,
+            })
+        }
+        ChartSpec::Summary { title } | ChartSpec::Table { title } => {
+            let x = infer_chart_x(preview)?;
+            let y = infer_chart_y(preview);
+            if y.is_empty() {
+                return None;
+            }
+            let color = infer_chart_color(preview, &x, &y);
+            Some(build_vega_lite_chart(
+                preview,
+                &format!("{title} (Stacked)"),
+                "bar",
+                x,
+                y,
+                color,
+                true,
+            ))
+        }
+    }
+}
+
+fn vega_encoding_field(spec: &Value, channel: &str) -> Option<String> {
+    spec.get("encoding")?
+        .get(channel)?
+        .get("field")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn chart_title(chart: &ChartSpec) -> &str {
+    match chart {
+        ChartSpec::Summary { title }
+        | ChartSpec::Table { title }
+        | ChartSpec::VegaLite { title, .. } => title,
+    }
+}
+
+enum ChartFollowUp {
+    StackedBar,
+}
+
+fn parse_chart_follow_up(question: &str) -> Option<ChartFollowUp> {
+    let lowered = question.to_ascii_lowercase();
+    let refers_to_prior = [
+        "previous",
+        "prior",
+        "same",
+        "that chart",
+        "that graph",
+        "this chart",
+        "this graph",
+    ]
+    .iter()
+    .any(|pattern| lowered.contains(pattern));
+    let mentions_visual = ["chart", "graph", "plot", "visual"]
+        .iter()
+        .any(|pattern| lowered.contains(pattern));
+    if (refers_to_prior || mentions_visual)
+        && lowered.contains("stacked")
+        && lowered.contains("bar")
+    {
+        return Some(ChartFollowUp::StackedBar);
+    }
+    None
+}
+
+fn infer_chart_x(preview: &QueryPreview) -> Option<String> {
+    preview
+        .columns
+        .iter()
+        .find(|column| {
+            is_timeish_name(column) || column_values_look_like_datetimes(preview, column)
+        })
+        .cloned()
+        .or_else(|| {
+            preview
+                .columns
+                .iter()
+                .find(|column| !column_values_look_numeric(preview, column))
+                .cloned()
+        })
+}
+
+fn infer_chart_y(preview: &QueryPreview) -> Vec<String> {
+    preview
+        .columns
+        .iter()
+        .filter(|column| column_values_look_numeric(preview, column))
+        .take(2)
+        .cloned()
+        .collect()
+}
+
+fn infer_chart_color(preview: &QueryPreview, x: &str, y: &[String]) -> Option<String> {
+    preview
+        .columns
+        .iter()
+        .find(|column| {
+            column.as_str() != x
+                && !y.iter().any(|item| item == *column)
+                && !column_values_look_numeric(preview, column)
+        })
+        .cloned()
+}
+
+fn vega_field_type(preview: &QueryPreview, column: &str) -> &'static str {
+    if is_timeish_name(column) || column_values_look_like_datetimes(preview, column) {
+        "temporal"
+    } else if column_values_look_numeric(preview, column) {
+        "quantitative"
+    } else {
+        "nominal"
+    }
+}
+
+fn axis_title_for_column(preview: &QueryPreview, column: &str) -> String {
+    let unit = infer_unit(column);
+    let is_datetime = is_timeish_name(column) || column_values_look_like_datetimes(preview, column);
+    if is_datetime {
+        format!("{} (UTC)", prettify_column(column))
+    } else if let Some(unit) = unit {
+        format!("{} ({unit})", prettify_column(column))
+    } else {
+        prettify_column(column)
+    }
+}
+
+fn infer_unit(column: &str) -> Option<&'static str> {
+    let lowered = column.to_ascii_lowercase();
+    if lowered.contains("mwh") || lowered.contains("energy") {
+        Some("MWh")
+    } else if lowered.contains("rrp")
+        || lowered.contains("rop")
+        || lowered.contains("eep")
+        || lowered.contains("price")
+        || lowered.contains("marginalvalue")
+    {
+        Some("AUD/MWh")
+    } else if lowered.contains("demand") || lowered.contains("mw") || lowered.contains("flow") {
+        Some("MW")
+    } else if lowered.contains("percent") || lowered.ends_with("pct") {
+        Some("%")
+    } else {
+        None
+    }
+}
+
+fn prettify_column(column: &str) -> String {
+    column
+        .replace('_', " ")
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn is_timeish_name(column: &str) -> bool {
@@ -643,7 +1226,11 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Plan, QueryPreview, build_chart_spec, enforce_semantic_contract, validate_sql};
+    use super::{
+        Plan, QueryPreview, build_chart_spec, enforce_semantic_contract,
+        maybe_build_visualization_follow_up, validate_sql,
+    };
+    use crate::models::{ChartSpec, ThreadContextMessage};
 
     #[test]
     fn validate_sql_allows_semantic_select() {
@@ -691,6 +1278,75 @@ mod tests {
             row_count: 1,
         };
         let chart = build_chart_spec(&preview, "Price");
-        assert_eq!(chart.kind, "summary");
+        assert!(matches!(chart, ChartSpec::Summary { .. }));
+    }
+
+    #[test]
+    fn previous_result_can_be_recast_as_stacked_bar() {
+        let context = vec![ThreadContextMessage {
+            role: "assistant".to_string(),
+            content: "Here is the daily fuel breakdown.".to_string(),
+            sql_text: Some("SELECT ...".to_string()),
+            metadata: json!({
+                "chart": {
+                    "renderer": "vega_lite",
+                    "title": "Daily Energy by Fuel Type",
+                    "spec": {
+                        "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+                        "mark": { "type": "line", "point": true },
+                        "encoding": {
+                            "x": { "field": "day", "type": "temporal" },
+                            "y": { "field": "mwh", "type": "quantitative" },
+                            "color": { "field": "fuel_type", "type": "nominal" }
+                        }
+                    }
+                },
+                "preview": {
+                    "columns": ["day", "fuel_type", "mwh"],
+                    "rows": [
+                        ["2026-03-02", "Black coal", 1528867.0],
+                        ["2026-03-02", "Wind", 491045.0]
+                    ],
+                    "row_count": 2
+                }
+            }),
+        }];
+
+        let Some((_, answer, chart, preview)) = maybe_build_visualization_follow_up(
+            "give the previous graph as a stacked bar graph",
+            &context,
+        ) else {
+            panic!("expected chart follow-up");
+        };
+
+        assert_eq!(
+            answer.answer,
+            "Updated the previous result to a stacked bar chart."
+        );
+        match chart {
+            ChartSpec::VegaLite { spec, .. } => {
+                assert_eq!(
+                    spec.pointer("/mark/type").and_then(|value| value.as_str()),
+                    Some("bar")
+                );
+                assert_eq!(
+                    spec.pointer("/encoding/y/stack")
+                        .and_then(|value| value.as_str()),
+                    Some("zero")
+                );
+                assert_eq!(
+                    spec.pointer("/encoding/x/field")
+                        .and_then(|value| value.as_str()),
+                    Some("day")
+                );
+                assert_eq!(
+                    spec.pointer("/encoding/color/field")
+                        .and_then(|value| value.as_str()),
+                    Some("fuel_type")
+                );
+            }
+            _ => panic!("expected vega-lite chart"),
+        }
+        assert_eq!(preview.row_count, 2);
     }
 }
