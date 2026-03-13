@@ -75,7 +75,11 @@ pub fn repair_user_prompt(
 }
 
 pub fn answer_system_prompt() -> &'static str {
-    "You are a careful NEM analyst. Write a concise answer to the user's question based on the query result and a short analyst note. State the substantive answer first. Focus on key insights, comparisons, extremes, trends, or notable caveats. Do not narrate the chart. Do not restate the table schema, column list, row count, date coverage, or print raw rows unless the user explicitly asked for that. Do not say things like 'the chart shows', 'the table contains', or 'Total rows'. Avoid generic meta-commentary. Respect the provided caveats and confidence. Return JSON only with keys answer and note."
+    "You are a careful NEM analyst. Write a concise answer to the user's question based on the query result and a short analyst note. State the substantive answer first. Focus on key insights, comparisons, extremes, trends, or notable caveats. Do not narrate the chart. Do not restate the table schema, column list, row count, date coverage, or print raw rows unless the user explicitly asked for that. Do not say things like 'the chart shows', 'the table contains', or 'Total rows'. Never provide code, pseudocode, Python, matplotlib, pandas, Plotly JSON, or instructions for how to produce a chart. The application already renders the chart. Avoid generic meta-commentary. Respect the provided caveats and confidence. Return JSON only with keys answer and note."
+}
+
+pub fn answer_repair_system_prompt() -> &'static str {
+    "You are repairing an analytics answer that violated product rules. Return a concise direct answer to the question, not instructions. Never include code, code fences, pseudocode, Python, matplotlib, pandas, Plotly JSON, or implementation steps. Never narrate the chart or describe table structure. The chart is already rendered by the product. Return JSON only with keys answer and note."
 }
 
 pub fn chart_system_prompt() -> &'static str {
@@ -171,4 +175,48 @@ pub fn answer_user_prompt(
         }
     });
     serde_json::to_string_pretty(&payload).expect("answer prompt")
+}
+
+pub fn answer_repair_user_prompt(
+    question: &str,
+    plan: &Plan,
+    columns: &[String],
+    rows: &[Vec<serde_json::Value>],
+    thread_context: &Value,
+    invalid_answer: &str,
+    violation: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "question": question,
+        "thread_context": thread_context,
+        "violation": violation,
+        "invalid_answer": invalid_answer,
+        "plan": {
+            "data_description": plan.data_description,
+            "note": plan.note,
+            "confidence": plan.confidence,
+            "reason": plan.reason,
+            "used_objects": plan.used_objects
+        },
+        "style_guidance": {
+            "primary_goal": "answer the question with a short analyst takeaway, not instructions or chart narration",
+            "must_not_do": [
+                "include any code",
+                "mention Python, pandas, matplotlib, Plotly, or snippets",
+                "describe how to make a chart",
+                "describe the table layout or raw rows",
+                "say phrases like 'the chart shows', 'the table contains', or 'total rows'"
+            ]
+        },
+        "results_summary": {
+            "row_count": rows.len(),
+            "columns": columns,
+            "preview": rows.iter().take(12).collect::<Vec<_>>()
+        },
+        "required_output_schema": {
+            "answer": "string",
+            "note": "string"
+        }
+    });
+    serde_json::to_string_pretty(&payload).expect("answer repair prompt")
 }

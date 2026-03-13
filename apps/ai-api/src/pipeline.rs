@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MAX_ATTEMPTS: usize = 3;
+const MAX_ANSWER_ATTEMPTS: usize = 2;
 
 pub async fn execute_chat(
     state: AppState,
@@ -375,21 +376,54 @@ async fn refine_answer(
     thread_context: &Value,
     run_id: Uuid,
 ) -> Result<FinalAnswer> {
-    let response = state
-        .llm
-        .json_completion(
-            prompts::answer_system_prompt(),
-            &prompts::answer_user_prompt(
-                question,
-                plan,
-                &preview.columns,
-                &preview.rows,
-                thread_context,
-            ),
-        )
-        .await?;
-    log_llm_usage(state, user, run_id, "answer", &response).await?;
-    Ok(extract_json::<FinalAnswer>(&response.text)?)
+    let mut invalid_answer = None::<String>;
+    let mut violation = None::<String>;
+
+    for attempt in 0..MAX_ANSWER_ATTEMPTS {
+        let (system_prompt, user_prompt, prompt_type) =
+            if let (Some(previous), Some(reason)) = (&invalid_answer, &violation) {
+                (
+                    prompts::answer_repair_system_prompt(),
+                    prompts::answer_repair_user_prompt(
+                        question,
+                        plan,
+                        &preview.columns,
+                        &preview.rows,
+                        thread_context,
+                        previous,
+                        reason,
+                    ),
+                    "answer_repair",
+                )
+            } else {
+                (
+                    prompts::answer_system_prompt(),
+                    prompts::answer_user_prompt(
+                        question,
+                        plan,
+                        &preview.columns,
+                        &preview.rows,
+                        thread_context,
+                    ),
+                    "answer",
+                )
+            };
+
+        let response = state.llm.json_completion(system_prompt, &user_prompt).await?;
+        log_llm_usage(state, user, run_id, prompt_type, &response).await?;
+        let answer = extract_json::<FinalAnswer>(&response.text)?;
+        if let Err(reason) = validate_final_answer(&answer) {
+            invalid_answer = Some(answer.answer);
+            violation = Some(reason.to_string());
+            if attempt + 1 < MAX_ANSWER_ATTEMPTS {
+                continue;
+            }
+            bail!("answer validation failed: {reason}");
+        }
+        return Ok(answer);
+    }
+
+    bail!("answer generation failed")
 }
 
 async fn plan_chart(
@@ -1076,6 +1110,52 @@ fn chart_title(chart: &ChartSpec) -> &str {
     }
 }
 
+fn validate_final_answer(answer: &FinalAnswer) -> Result<()> {
+    let text = answer.answer.trim();
+    if text.is_empty() {
+        bail!("answer was empty");
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let forbidden_phrases = [
+        "python snippet",
+        "matplotlib",
+        "pandas",
+        "plt.",
+        "import pandas",
+        "import matplotlib",
+        "fig, ax",
+        "plt.show()",
+        "run the following",
+        "use the following python",
+        "plot the following",
+        "the chart shows",
+        "the table contains",
+        "total rows",
+        "to produce",
+    ];
+    if let Some(phrase) = forbidden_phrases
+        .iter()
+        .find(|phrase| lower.contains(**phrase))
+    {
+        bail!("answer contained forbidden phrase `{phrase}`");
+    }
+
+    if text.contains("```") {
+        bail!("answer contained a code block");
+    }
+
+    let suspicious_code = Regex::new(
+        r"(?m)^\s*(import\s+\w+|from\s+\w+\s+import|df\s*=|fig\s*,\s*ax\s*=|ax\.\w+\(|plt\.\w+\()",
+    )
+    .expect("valid code regex");
+    if suspicious_code.is_match(text) {
+        bail!("answer contained code-like instructions");
+    }
+
+    Ok(())
+}
+
 enum ChartFollowUp {
     StackedBar,
 }
@@ -1472,8 +1552,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Plan, QueryPreview, build_chart_spec, enforce_semantic_contract,
-        maybe_build_visualization_follow_up, validate_sql,
+        FinalAnswer, Plan, QueryPreview, build_chart_spec, enforce_semantic_contract,
+        maybe_build_visualization_follow_up, validate_final_answer, validate_sql,
     };
     use crate::models::{ChartSpec, ThreadContextMessage};
 
@@ -1591,5 +1671,24 @@ mod tests {
             _ => panic!("expected plotly chart"),
         }
         assert_eq!(preview.row_count, 2);
+    }
+
+    #[test]
+    fn answer_validation_blocks_python_plotting_instructions() {
+        let error = validate_final_answer(&FinalAnswer {
+            answer: "To produce a clear chart, run the following Python snippet:\nimport pandas as pd\nimport matplotlib.pyplot as plt".to_string(),
+            note: String::new(),
+        })
+        .expect_err("should reject plotting instructions");
+        assert!(error.to_string().contains("forbidden phrase"));
+    }
+
+    #[test]
+    fn answer_validation_allows_plain_analyst_takeaway() {
+        validate_final_answer(&FinalAnswer {
+            answer: "NSW1's daily average RRP was highest on 2026-03-12 at A$59.25/MWh and lowest on 2026-03-10 at A$41.54/MWh.".to_string(),
+            note: String::new(),
+        })
+        .expect("valid answer");
     }
 }
