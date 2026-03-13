@@ -201,7 +201,11 @@ impl SourceRegistry {
     }
 }
 
-fn stable_stagger_offset(source_id: &str, collection_id: &str, poll_interval_seconds: u64) -> u64 {
+pub(crate) fn stable_stagger_offset(
+    source_id: &str,
+    collection_id: &str,
+    poll_interval_seconds: u64,
+) -> u64 {
     if poll_interval_seconds <= 1 {
         return 0;
     }

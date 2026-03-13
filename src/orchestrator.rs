@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use crate::clickhouse::{ClickHousePublisher, MAX_INSERT_BYTES, MAX_INSERT_ROWS};
 use crate::db::{Db, now_iso};
 use crate::semantic::reconcile_source_semantics;
-use crate::source_registry::{ParsedArtifact, ScheduleSeed, SourceRegistry};
+use crate::source_registry::{ParsedArtifact, ScheduleSeed, SourceRegistry, stable_stagger_offset};
 
 #[derive(Debug, Clone)]
 pub struct Stats {
@@ -117,18 +117,24 @@ pub async fn run_orchestrator(
 
 async fn sync_schedules(db: &Db, seeds: &[ScheduleSeed]) -> Result<()> {
     let conn = db.lock().await;
-    let now = now_iso();
+    let now = Utc::now();
     for seed in seeds {
+        let next_discovery_at = next_staggered_discovery_at(
+            now,
+            seed.poll_interval_seconds,
+            seed.stagger_offset_seconds,
+        );
         conn.execute(
             "INSERT INTO schedules (source_id, collection_id, enabled, poll_interval_seconds, next_discovery_at)
              VALUES (?1, ?2, 1, ?3, ?4)
              ON CONFLICT (source_id, collection_id) DO UPDATE
-             SET poll_interval_seconds = excluded.poll_interval_seconds",
+             SET poll_interval_seconds = excluded.poll_interval_seconds,
+                 next_discovery_at = MIN(schedules.next_discovery_at, excluded.next_discovery_at)",
             rusqlite::params![
                 seed.source_id,
                 seed.collection_id,
                 seed.poll_interval_seconds,
-                now,
+                next_discovery_at.to_rfc3339(),
             ],
         )?;
     }
@@ -285,7 +291,13 @@ async fn run_discover(
         rusqlite::params![source_id, collection_id],
         |row| row.get(0),
     )?;
-    let next = Utc::now() + chrono::Duration::seconds(poll_interval);
+    let stagger_offset =
+        stable_stagger_offset(source_id, collection_id, poll_interval.max(1) as u64) as i64;
+    let next = next_staggered_discovery_at(
+        Utc::now(),
+        poll_interval.max(1) as u64,
+        stagger_offset.max(0) as u64,
+    );
     conn.execute(
         "UPDATE schedules SET next_discovery_at = ?1, last_discovery_at = ?2, last_success_at = ?2, consecutive_failures = 0
          WHERE source_id = ?3 AND collection_id = ?4",
@@ -890,4 +902,20 @@ fn sanitize_path(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn next_staggered_discovery_at(
+    now: DateTime<Utc>,
+    poll_interval_seconds: u64,
+    stagger_offset_seconds: u64,
+) -> DateTime<Utc> {
+    let interval = poll_interval_seconds.max(1) as i64;
+    let offset = (stagger_offset_seconds % poll_interval_seconds.max(1)) as i64;
+    let now_ts = now.timestamp();
+    let base = now_ts - (now_ts.rem_euclid(interval));
+    let mut next_ts = base + offset;
+    if next_ts <= now_ts {
+        next_ts += interval;
+    }
+    DateTime::<Utc>::from_timestamp(next_ts, 0).unwrap_or(now + chrono::Duration::seconds(interval))
 }
