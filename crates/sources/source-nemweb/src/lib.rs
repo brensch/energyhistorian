@@ -10,11 +10,11 @@ use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use ingest_core::{
     ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
-    DiscoveredArtifact, DiscoveryRequest, LocalArtifact, ParseResult, PluginCapabilities,
-    PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult, RuntimeSourcePlugin,
-    SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection, SourceDescriptor,
-    SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin, StructuredRawEventSink,
-    TaskBlueprint, TaskKind, semantic_model_registry_sql,
+    DiscoveredArtifact, DiscoveryCursorHint, DiscoveryRequest, LocalArtifact, ParseResult,
+    PluginCapabilities, PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult,
+    RuntimeSourcePlugin, SemanticJob, SemanticModel, SemanticNamingStrategy, SourceCollection,
+    SourceDescriptor, SourceFamilyCatalogEntry, SourceMetadataDocument, SourcePlugin,
+    StructuredRawEventSink, TaskBlueprint, TaskKind, semantic_model_registry_sql,
 };
 
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
@@ -43,14 +43,11 @@ impl NemwebPlugin {
         client: &reqwest::Client,
         collection_id: &str,
         limit: usize,
+        cursor: &DiscoveryCursorHint,
+        ctx: &RunContext,
     ) -> Result<Vec<DiscoveredArtifact>> {
         let family = families::lookup_family(collection_id)?;
-        let ctx = RunContext {
-            run_id: format!("{}-{}", family.id, Utc::now().timestamp_millis()),
-            environment: "service".to_string(),
-            parser_version: "source-nemweb/0.1".to_string(),
-        };
-        discover::discover_recent_archives(client, &family, limit, &ctx).await
+        discover::discover_recent_archives(client, &family, limit, cursor, ctx).await
     }
 
     /// Fetch a single discovered artifact archive.
@@ -674,10 +671,13 @@ impl RuntimeSourcePlugin for NemwebPlugin {
         client: &'a reqwest::Client,
         collection_id: &'a str,
         limit: usize,
-        _cursor: &'a ingest_core::DiscoveryCursorHint,
-        _ctx: &'a RunContext,
+        cursor: &'a ingest_core::DiscoveryCursorHint,
+        ctx: &'a RunContext,
     ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>> {
-        Box::pin(async move { self.discover_collection(client, collection_id, limit).await })
+        Box::pin(async move {
+            self.discover_collection(client, collection_id, limit, cursor, ctx)
+                .await
+        })
     }
 
     fn fetch_artifact_async<'a>(

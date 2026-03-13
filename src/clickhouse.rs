@@ -30,6 +30,7 @@ pub struct ClickHousePublisher {
     initialized_databases: Arc<Mutex<HashSet<String>>>,
     known_raw_tables: Arc<Mutex<HashSet<(String, String)>>>,
     known_schemas: Arc<Mutex<HashMap<String, HashSet<(String, String)>>>>,
+    semantic_reconcile_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -55,7 +56,12 @@ impl ClickHousePublisher {
             initialized_databases: Arc::new(Mutex::new(HashSet::new())),
             known_raw_tables: Arc::new(Mutex::new(HashSet::new())),
             known_schemas: Arc::new(Mutex::new(HashMap::new())),
+            semantic_reconcile_lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    pub async fn lock_semantic_reconcile(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.semantic_reconcile_lock.lock().await
     }
 
     pub async fn ensure_ready(&self) -> Result<()> {

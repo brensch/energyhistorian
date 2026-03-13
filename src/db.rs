@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_status ON artifacts(status);
 CREATE INDEX IF NOT EXISTS idx_artifacts_source_status ON artifacts(source_id, collection_id, status);
+CREATE INDEX IF NOT EXISTS idx_artifacts_source_uri ON artifacts(source_id, collection_id, remote_uri);
 
 CREATE TABLE IF NOT EXISTS downloads (
     artifact_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id),

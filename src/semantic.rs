@@ -45,6 +45,7 @@ pub async fn reconcile_source_semantics(
     registry: &SourceRegistry,
     source_id: &str,
 ) -> Result<usize> {
+    let _guard = publisher.lock_semantic_reconcile().await;
     let jobs = registry.semantic_jobs(source_id)?;
     if jobs.is_empty() {
         return Ok(0);

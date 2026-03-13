@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use ingest_core::{ObservedSchema, RunContext, StructuredRow};
+use ingest_core::{DiscoveryCursorHint, ObservedSchema, RunContext, StructuredRow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -62,7 +62,14 @@ pub async fn ingest_recent(
         .build()
         .context("building HTTP client")?;
 
-    let discovered = discover_recent_archives(&client, &family, limit, &ctx).await?;
+    let discovered = discover_recent_archives(
+        &client,
+        &family,
+        limit,
+        &DiscoveryCursorHint::default(),
+        &ctx,
+    )
+    .await?;
     let source_raw_dir = raw_dir.join(&family.id);
     let source_parsed_dir = parsed_dir.join(&family.id);
     fs::create_dir_all(&source_raw_dir)?;

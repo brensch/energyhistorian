@@ -25,6 +25,8 @@ pub struct RunContext {
 pub struct DiscoveryCursorHint {
     pub latest_publication_timestamp: Option<chrono::DateTime<chrono::Utc>>,
     pub latest_release_name: Option<String>,
+    pub earliest_publication_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub earliest_release_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

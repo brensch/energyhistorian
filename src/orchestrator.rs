@@ -17,6 +17,8 @@ use crate::db::{Db, now_iso};
 use crate::semantic::reconcile_source_semantics;
 use crate::source_registry::{ParsedArtifact, ScheduleSeed, SourceRegistry, stable_stagger_offset};
 
+const DISCOVERY_BATCH_LIMIT: usize = 100;
+
 #[derive(Debug, Clone)]
 pub struct Stats {
     pub discovers_ok: Arc<AtomicU64>,
@@ -220,6 +222,7 @@ async fn discover_loop(
                     }
                     Err(e) => {
                         stats.discovers_err.fetch_add(1, Ordering::Relaxed);
+                        let _ = record_schedule_failure(&db, &source_id, &collection_id, e).await;
                         warn!(source_id, collection_id, error = %e, "discovery failed");
                     }
                 }
@@ -257,20 +260,29 @@ async fn run_discover(
 ) -> Result<usize> {
     let cursor = fetch_cursor_hint(db, source_id, collection_id).await?;
     let discoveries = registry
-        .discover(http_client, source_id, collection_id, 10, &cursor)
+        .discover(
+            http_client,
+            source_id,
+            collection_id,
+            DISCOVERY_BATCH_LIMIT,
+            &cursor,
+        )
         .await?;
 
     let now = now_iso();
-    let count = discoveries.len();
+    let mut inserted = 0usize;
 
     let conn = db.lock().await;
     for artifact in &discoveries {
         let metadata_json = serde_json::to_string(&artifact.metadata)?;
         let artifact_kind = format!("{:?}", artifact.metadata.kind);
-        conn.execute(
+        inserted += conn.execute(
             "INSERT INTO artifacts (artifact_id, source_id, collection_id, remote_uri, artifact_kind, metadata_json, discovered_at, publication_timestamp, status, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'discovered', ?9)
-             ON CONFLICT (artifact_id) DO NOTHING",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'discovered', ?9
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM artifacts
+                 WHERE source_id = ?2 AND collection_id = ?3 AND remote_uri = ?4
+             )",
             rusqlite::params![
                 artifact.metadata.artifact_id,
                 source_id,
@@ -299,12 +311,12 @@ async fn run_discover(
         stagger_offset.max(0) as u64,
     );
     conn.execute(
-        "UPDATE schedules SET next_discovery_at = ?1, last_discovery_at = ?2, last_success_at = ?2, consecutive_failures = 0
+        "UPDATE schedules SET next_discovery_at = ?1, last_discovery_at = ?2, last_success_at = ?2, last_error_at = NULL, consecutive_failures = 0
          WHERE source_id = ?3 AND collection_id = ?4",
         rusqlite::params![next.to_rfc3339(), now, source_id, collection_id],
     )?;
 
-    Ok(count)
+    Ok(inserted)
 }
 
 async fn fetch_cursor_hint(
@@ -313,32 +325,126 @@ async fn fetch_cursor_hint(
     collection_id: &str,
 ) -> Result<DiscoveryCursorHint> {
     let conn = db.lock().await;
-    let result = conn.query_row(
-        "SELECT publication_timestamp, metadata_json FROM artifacts
-         WHERE source_id = ?1 AND collection_id = ?2
-         ORDER BY publication_timestamp DESC NULLS LAST, discovered_at DESC
-         LIMIT 1",
-        rusqlite::params![source_id, collection_id],
-        |row| {
-            let pub_ts: Option<String> = row.get(0)?;
-            let metadata_json: String = row.get(1)?;
-            Ok((pub_ts, metadata_json))
-        },
-    );
-    match result {
-        Ok((pub_ts, metadata_json)) => {
-            let metadata: ArtifactMetadata = serde_json::from_str(&metadata_json)?;
-            let latest_publication_timestamp = pub_ts
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc));
-            Ok(DiscoveryCursorHint {
-                latest_publication_timestamp,
-                latest_release_name: metadata.release_name,
-            })
+    let mut stmt = conn.prepare(
+        "SELECT publication_timestamp, metadata_json, remote_uri, discovered_at
+         FROM artifacts
+         WHERE source_id = ?1 AND collection_id = ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![source_id, collection_id], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+
+    let mut latest: Option<CursorCandidate> = None;
+    let mut earliest: Option<CursorCandidate> = None;
+    for row in rows {
+        let (pub_ts, metadata_json, remote_uri, discovered_at) = row?;
+        let metadata: ArtifactMetadata = serde_json::from_str(&metadata_json)?;
+        let publication_timestamp = pub_ts
+            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+            .map(|value| value.with_timezone(&Utc));
+        let discovered_at = DateTime::parse_from_rfc3339(&discovered_at)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let candidate = CursorCandidate {
+            publication_timestamp,
+            release_name: metadata
+                .release_name
+                .clone()
+                .or_else(|| release_name_from_uri(&remote_uri)),
+            discovered_at,
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|current| compare_cursor_candidates(&candidate, current).is_gt())
+        {
+            latest = Some(candidate.clone());
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(DiscoveryCursorHint::default()),
-        Err(e) => Err(e.into()),
+        if earliest
+            .as_ref()
+            .is_none_or(|current| compare_cursor_candidates(&candidate, current).is_lt())
+        {
+            earliest = Some(candidate);
+        }
     }
+
+    Ok(DiscoveryCursorHint {
+        latest_publication_timestamp: latest
+            .as_ref()
+            .and_then(|candidate| candidate.publication_timestamp),
+        latest_release_name: latest.and_then(|candidate| candidate.release_name),
+        earliest_publication_timestamp: earliest
+            .as_ref()
+            .and_then(|candidate| candidate.publication_timestamp),
+        earliest_release_name: earliest.and_then(|candidate| candidate.release_name),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct CursorCandidate {
+    publication_timestamp: Option<DateTime<Utc>>,
+    release_name: Option<String>,
+    discovered_at: DateTime<Utc>,
+}
+
+fn compare_cursor_candidates(
+    left: &CursorCandidate,
+    right: &CursorCandidate,
+) -> std::cmp::Ordering {
+    left.release_name
+        .cmp(&right.release_name)
+        .then_with(|| left.publication_timestamp.cmp(&right.publication_timestamp))
+        .then_with(|| left.discovered_at.cmp(&right.discovered_at))
+}
+
+fn release_name_from_uri(remote_uri: &str) -> Option<String> {
+    remote_uri.rsplit('/').next().map(str::to_string)
+}
+
+async fn record_schedule_failure(
+    db: &Db,
+    source_id: &str,
+    collection_id: &str,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let now = Utc::now();
+    let conn = db.lock().await;
+    let (poll_interval, failures): (i64, i64) = conn.query_row(
+        "SELECT poll_interval_seconds, consecutive_failures FROM schedules WHERE source_id = ?1 AND collection_id = ?2",
+        rusqlite::params![source_id, collection_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let backoff_seconds = (30_i64 * (failures + 1)).min(poll_interval.max(30));
+    let stagger_offset =
+        stable_stagger_offset(source_id, collection_id, poll_interval.max(1) as u64) as i64;
+    let next = next_staggered_discovery_at(
+        now + chrono::Duration::seconds(backoff_seconds),
+        poll_interval.max(1) as u64,
+        stagger_offset.max(0) as u64,
+    );
+    conn.execute(
+        "UPDATE schedules
+         SET next_discovery_at = ?1,
+             last_error_at = ?2,
+             consecutive_failures = consecutive_failures + 1
+         WHERE source_id = ?3 AND collection_id = ?4",
+        rusqlite::params![
+            next.to_rfc3339(),
+            now.to_rfc3339(),
+            source_id,
+            collection_id
+        ],
+    )?;
+    conn.execute(
+        "UPDATE artifacts SET error_text = ?1
+         WHERE source_id = ?2 AND collection_id = ?3 AND status = 'discovered'",
+        rusqlite::params![format!("{error:#}"), source_id, collection_id],
+    )?;
+    Ok(())
 }
 
 // ── Download Loop ──────────────────────────────────────────────────
@@ -544,9 +650,20 @@ async fn parse_loop(
                         stats.parses_err.fetch_add(1, Ordering::Relaxed);
                         warn!(artifact_id, error = %e, "parse failed");
                         let conn = db.lock().await;
+                        let parser_version = registry
+                            .parser_version(&source_id)
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let now = now_iso();
+                        let _ = conn.execute(
+                            "INSERT INTO parse_runs (artifact_id, parser_version, status, row_count, summary_json, started_at, completed_at, error_text)
+                             VALUES (?1, ?2, 'failed', NULL, NULL, ?3, ?3, ?4)
+                             ON CONFLICT (artifact_id, parser_version) DO UPDATE
+                             SET status = 'failed', row_count = NULL, summary_json = NULL, completed_at = excluded.completed_at, error_text = excluded.error_text",
+                            rusqlite::params![artifact_id, parser_version, now, format!("{e:#}")],
+                        );
                         let _ = conn.execute(
                             "UPDATE artifacts SET status = 'parse_failed', error_text = ?1, updated_at = ?2 WHERE artifact_id = ?3",
-                            rusqlite::params![format!("{e:#}"), now_iso(), artifact_id],
+                            rusqlite::params![format!("{e:#}"), now, artifact_id],
                         );
                     }
                 }
