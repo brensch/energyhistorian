@@ -289,10 +289,7 @@ async fn build_union_view_sql(
 
 async fn replace_view(publisher: &ClickHousePublisher, full_name: &str, sql: &str) -> Result<()> {
     publisher
-        .execute_sql(&format!("DROP VIEW IF EXISTS {full_name}"))
-        .await?;
-    publisher
-        .execute_sql(&format!("CREATE VIEW {full_name} AS {sql}"))
+        .execute_sql(&format!("CREATE OR REPLACE VIEW {full_name} AS {sql}"))
         .await?;
     Ok(())
 }

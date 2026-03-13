@@ -1,4 +1,26 @@
 services:
+  energyhistorian:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: energyhistorian
+      CLICKHOUSE_PASSWORD: energyhistorian
+      DATA_DIR: /data
+      LISTEN_ADDR: "0.0.0.0:8080"
+      DISCOVER_CONCURRENCY: "4"
+      DOWNLOAD_CONCURRENCY: "4"
+      PARSE_CONCURRENCY: "4"
+    ports:
+      - "8080:8080"
+    volumes:
+      - historian-data:/data
+
   clickhouse:
     image: clickhouse/clickhouse-server:25.2
     environment:
@@ -33,3 +55,4 @@ services:
 
 volumes:
   clickhouse-data:
+  historian-data:
