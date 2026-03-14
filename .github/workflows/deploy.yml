@@ -1,0 +1,48 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - Linux
+    env:
+      DEPLOY_BRANCH: main
+      DEPLOY_PATH: /srv/energyhistorian
+    steps:
+      - name: Validate deploy path
+        run: |
+          set -euo pipefail
+          test -d "${DEPLOY_PATH}"
+          test -f "${DEPLOY_PATH}/compose.yaml"
+
+      - name: Deploy on runner host
+        working-directory: /srv/energyhistorian
+        run: |
+          set -euo pipefail
+          if docker compose version >/dev/null 2>&1; then
+            compose_cmd=(docker compose)
+          elif command -v docker-compose >/dev/null 2>&1; then
+            compose_cmd=(docker-compose)
+          else
+            echo "docker compose is not installed on the runner host" >&2
+            exit 1
+          fi
+
+          git fetch origin "${DEPLOY_BRANCH}"
+          git checkout "${DEPLOY_BRANCH}"
+          git reset --hard "origin/${DEPLOY_BRANCH}"
+
+          "${compose_cmd[@]}" up -d --build --remove-orphans

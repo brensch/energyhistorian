@@ -231,6 +231,17 @@ The default dev credentials remain `energyhistorian` / `energyhistorian` for Pos
 
 ## Notes
 
+- Auto deploy is wired through GitHub Actions in `.github/workflows/deploy.yml`.
+- The deploy job runs on the repo's self-hosted GitHub Actions runner using the default `self-hosted` and `Linux` labels.
+- The workflow deploys from `/srv/energyhistorian`.
+- It runs `git fetch origin main`, `git checkout main`, `git reset --hard origin/main`, then `docker compose up -d --build --remove-orphans`.
+- Server prerequisites:
+  - the repo is already cloned on the server at `/srv/energyhistorian`
+  - `.env` exists on the server if you use the `ai` profile or any secret-backed settings
+  - Docker with `docker compose` is installed on the server
+  - the user running the self-hosted runner can access Docker and can `git fetch` this repo
+- If you want the `ai` profile services deployed too, set `COMPOSE_PROFILES=ai` in the runner service environment and the workflow's compose call will pick it up.
+
 - The long-term direction is service-first with Postgres as the operational control plane and S3-compatible object storage for immutable fetched artifacts.
 - The source crates remain the core ingestion logic; the service split is around orchestration and execution roles.
 - ClickHouse remains the analytical warehouse.
