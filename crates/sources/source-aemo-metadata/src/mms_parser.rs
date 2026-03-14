@@ -58,12 +58,11 @@ pub fn parse_toc(html: &str) -> Result<Vec<TocEntry>> {
             }
         } else if text.starts_with("Table: ") {
             // Table entry — add its page to the current package
-            if let Some(ref pkg) = current_package {
-                if let Some(entry) = entries.iter_mut().find(|e| e.package_name == *pkg) {
-                    if !entry.page_files.contains(&filename) {
-                        entry.page_files.push(filename);
-                    }
-                }
+            if let Some(ref pkg) = current_package
+                && let Some(entry) = entries.iter_mut().find(|e| e.package_name == *pkg)
+                && !entry.page_files.contains(&filename)
+            {
+                entry.page_files.push(filename);
             }
         }
     }
@@ -124,15 +123,7 @@ fn parse_page(html: &str, package_id: &str) -> Result<Vec<MmsTable>> {
 
     let mut elements: Vec<DocElement> = Vec::new();
 
-    let mut current_table_name: Option<String> = None;
-    let mut current_comment = String::new();
-    let mut current_source = String::new();
-    let mut current_volume = String::new();
-    let mut current_visibility = String::new();
-    let mut current_notes = String::new();
-    let mut current_pk_columns: Vec<String> = Vec::new();
-    let mut current_index_columns: Vec<String> = Vec::new();
-    let mut current_columns: Vec<MmsColumn> = Vec::new();
+    let mut current = CurrentTableState::default();
     let mut current_section = String::new();
 
     let h2_sel = Selector::parse("h2").unwrap();
@@ -225,45 +216,33 @@ fn parse_page(html: &str, package_id: &str) -> Result<Vec<MmsTable>> {
         match elem {
             DocElement::TableHeader(name) => {
                 // Flush previous table
-                flush_table(
-                    &mut tables,
-                    package_id,
-                    &mut current_table_name,
-                    &mut current_comment,
-                    &mut current_source,
-                    &mut current_volume,
-                    &mut current_visibility,
-                    &mut current_notes,
-                    &mut current_pk_columns,
-                    &mut current_index_columns,
-                    &mut current_columns,
-                );
-                current_table_name = Some(name.clone());
+                current.flush_into(&mut tables, package_id);
+                current.table_name = Some(name.clone());
                 current_section.clear();
             }
             DocElement::SectionHeader(text) => {
                 current_section = text.clone();
             }
             DocElement::DescriptionBlock(pairs) => {
-                if current_table_name.is_none() {
+                if current.table_name.is_none() {
                     continue;
                 }
                 for (label, value) in pairs {
                     match label.as_str() {
-                        "Source" => current_source = value.clone(),
-                        "Volume" => current_volume = value.clone(),
+                        "Source" => current.source = value.clone(),
+                        "Volume" => current.volume = value.clone(),
                         "Note" | "Notes" => {
-                            if !current_notes.is_empty() {
-                                current_notes.push(' ');
+                            if !current.notes.is_empty() {
+                                current.notes.push(' ');
                             }
-                            current_notes.push_str(value);
+                            current.notes.push_str(value);
                         }
                         _ => {}
                     }
                 }
             }
             DocElement::HtmlTableWithClass(class, rows) => {
-                if current_table_name.is_none() {
+                if current.table_name.is_none() {
                     continue;
                 }
 
@@ -274,7 +253,7 @@ fn parse_page(html: &str, package_id: &str) -> Result<Vec<MmsTable>> {
                             let label = row[0].join(" ").to_lowercase();
                             let value = row[1].join(" ");
                             if label.contains("comment") {
-                                current_comment = value;
+                                current.comment = value;
                             }
                         }
                     }
@@ -283,19 +262,19 @@ fn parse_page(html: &str, package_id: &str) -> Result<Vec<MmsTable>> {
                         if let Some(cells) = row.first() {
                             let name = cells.join("").trim().to_string();
                             if !name.is_empty() && name != "Name" {
-                                current_pk_columns.push(name);
+                                current.pk_columns.push(name);
                             }
                         }
                     }
                 } else if current_section == "Content" || current_section.starts_with("Content") {
                     // Column definitions: Name | Data Type | Mandatory | Comment
-                    parse_content_rows(rows, &mut current_columns);
+                    parse_content_rows(rows, &mut current.columns);
                 } else if current_section.contains("Index") {
                     for row in rows.iter().skip(1) {
                         if let Some(cells) = row.first() {
                             let name = cells.join("").trim().to_string();
                             if !name.is_empty() && name != "Name" {
-                                current_index_columns.push(name);
+                                current.index_columns.push(name);
                             }
                         }
                     }
@@ -305,7 +284,7 @@ fn parse_page(html: &str, package_id: &str) -> Result<Vec<MmsTable>> {
                             let label = row[0].join("").to_lowercase();
                             let value = row[2].join("");
                             if label.contains("visibility") {
-                                current_visibility = value.trim().to_string();
+                                current.visibility = value.trim().to_string();
                             }
                         }
                     }
@@ -315,65 +294,60 @@ fn parse_page(html: &str, package_id: &str) -> Result<Vec<MmsTable>> {
     }
 
     // Flush last table
-    flush_table(
-        &mut tables,
-        package_id,
-        &mut current_table_name,
-        &mut current_comment,
-        &mut current_source,
-        &mut current_volume,
-        &mut current_visibility,
-        &mut current_notes,
-        &mut current_pk_columns,
-        &mut current_index_columns,
-        &mut current_columns,
-    );
+    current.flush_into(&mut tables, package_id);
 
     Ok(tables)
 }
 
-fn flush_table(
-    tables: &mut Vec<MmsTable>,
-    package_id: &str,
-    current_table_name: &mut Option<String>,
-    current_comment: &mut String,
-    current_source: &mut String,
-    current_volume: &mut String,
-    current_visibility: &mut String,
-    current_notes: &mut String,
-    current_pk_columns: &mut Vec<String>,
-    current_index_columns: &mut Vec<String>,
-    current_columns: &mut Vec<MmsColumn>,
-) {
-    if let Some(table_name) = current_table_name.take() {
-        for col in current_columns.iter_mut() {
-            if current_pk_columns.contains(&col.column_name) {
-                col.is_primary_key = true;
+#[derive(Debug, Default)]
+struct CurrentTableState {
+    table_name: Option<String>,
+    comment: String,
+    source: String,
+    volume: String,
+    visibility: String,
+    notes: String,
+    pk_columns: Vec<String>,
+    index_columns: Vec<String>,
+    columns: Vec<MmsColumn>,
+}
+
+impl CurrentTableState {
+    fn flush_into(&mut self, tables: &mut Vec<MmsTable>, package_id: &str) {
+        if let Some(table_name) = self.table_name.take() {
+            for col in &mut self.columns {
+                if self.pk_columns.contains(&col.column_name) {
+                    col.is_primary_key = true;
+                }
+            }
+            if !self.columns.is_empty() {
+                tables.push(MmsTable {
+                    package_id: package_id.to_string(),
+                    table_name,
+                    description: std::mem::take(&mut self.comment),
+                    source_notes: std::mem::take(&mut self.source),
+                    volume_notes: std::mem::take(&mut self.volume),
+                    visibility: std::mem::take(&mut self.visibility),
+                    additional_notes: std::mem::take(&mut self.notes),
+                    primary_key_columns: std::mem::take(&mut self.pk_columns),
+                    index_columns: std::mem::take(&mut self.index_columns),
+                    columns: std::mem::take(&mut self.columns),
+                });
+            } else {
+                self.clear_metadata();
             }
         }
-        if !current_columns.is_empty() {
-            tables.push(MmsTable {
-                package_id: package_id.to_string(),
-                table_name,
-                description: std::mem::take(current_comment),
-                source_notes: std::mem::take(current_source),
-                volume_notes: std::mem::take(current_volume),
-                visibility: std::mem::take(current_visibility),
-                additional_notes: std::mem::take(current_notes),
-                primary_key_columns: std::mem::take(current_pk_columns),
-                index_columns: std::mem::take(current_index_columns),
-                columns: std::mem::take(current_columns),
-            });
-        } else {
-            // Clear state even if no columns found
-            current_comment.clear();
-            current_source.clear();
-            current_volume.clear();
-            current_visibility.clear();
-            current_notes.clear();
-            current_pk_columns.clear();
-            current_index_columns.clear();
-        }
+    }
+
+    fn clear_metadata(&mut self) {
+        self.comment.clear();
+        self.source.clear();
+        self.volume.clear();
+        self.visibility.clear();
+        self.notes.clear();
+        self.pk_columns.clear();
+        self.index_columns.clear();
+        self.columns.clear();
     }
 }
 

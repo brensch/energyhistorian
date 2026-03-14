@@ -12,7 +12,7 @@ use ingest_core::{
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{error, info, warn};
 
-use crate::clickhouse::{ClickHousePublisher, MAX_INSERT_BYTES, MAX_INSERT_ROWS};
+use crate::clickhouse::{ClickHousePublisher, MAX_INSERT_BYTES, MAX_INSERT_ROWS, RawChunkContext};
 use crate::db::{Db, now_iso};
 use crate::semantic::reconcile_source_semantics;
 use crate::source_registry::{ParsedArtifact, ScheduleSeed, SourceRegistry, stable_stagger_offset};
@@ -42,14 +42,36 @@ impl Default for Stats {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct OrchestratorConfig {
+    pub data_dir: PathBuf,
+    pub discover_concurrency: usize,
+    pub download_concurrency: usize,
+    pub parse_concurrency: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadTask {
+    artifact_id: String,
+    source_id: String,
+    collection_id: String,
+    metadata_json: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParseTask {
+    artifact_id: String,
+    source_id: String,
+    collection_id: String,
+    metadata_json: String,
+    local_path: String,
+}
+
 pub async fn run_orchestrator(
     db: Db,
     registry: SourceRegistry,
     publisher: ClickHousePublisher,
-    data_dir: PathBuf,
-    discover_concurrency: usize,
-    download_concurrency: usize,
-    parse_concurrency: usize,
+    config: OrchestratorConfig,
     stats: Stats,
 ) -> Result<()> {
     // Sync schedule seeds into SQLite on startup
@@ -57,16 +79,16 @@ pub async fn run_orchestrator(
     sync_schedules(&db, &seeds).await?;
 
     // Recover any interrupted downloads: if file is missing, reset to discovered
-    recover_interrupted(&db, &data_dir).await?;
+    recover_interrupted(&db, &config.data_dir).await?;
 
     let http_client = reqwest::Client::builder()
         .user_agent("energyhistorian/0.1")
         .timeout(Duration::from_secs(120))
         .build()?;
 
-    let discover_sem = Arc::new(Semaphore::new(discover_concurrency.max(1)));
-    let download_sem = Arc::new(Semaphore::new(download_concurrency.max(1)));
-    let parse_sem = Arc::new(Semaphore::new(parse_concurrency.max(1)));
+    let discover_sem = Arc::new(Semaphore::new(config.discover_concurrency.max(1)));
+    let download_sem = Arc::new(Semaphore::new(config.download_concurrency.max(1)));
+    let parse_sem = Arc::new(Semaphore::new(config.parse_concurrency.max(1)));
 
     let discover_handle = tokio::spawn({
         let db = db.clone();
@@ -86,7 +108,7 @@ pub async fn run_orchestrator(
         let registry = registry.clone();
         let http_client = http_client.clone();
         let sem = download_sem.clone();
-        let data_dir = data_dir.clone();
+        let data_dir = config.data_dir.clone();
         let stats = stats.clone();
         async move {
             if let Err(e) = download_loop(db, registry, http_client, sem, data_dir, stats).await {
@@ -465,7 +487,7 @@ async fn download_loop(
         }
 
         let mut handles = Vec::new();
-        for (artifact_id, source_id, collection_id, metadata_json) in batch {
+        for task in batch {
             let permit = sem.clone().acquire_owned().await?;
             let db = db.clone();
             let registry = registry.clone();
@@ -473,29 +495,19 @@ async fn download_loop(
             let data_dir = data_dir.clone();
             let stats = stats.clone();
             handles.push(tokio::spawn(async move {
-                let result = run_download(
-                    &db,
-                    &registry,
-                    &http_client,
-                    &data_dir,
-                    &artifact_id,
-                    &source_id,
-                    &collection_id,
-                    &metadata_json,
-                )
-                .await;
+                let result = run_download(&db, &registry, &http_client, &data_dir, &task).await;
                 match &result {
                     Ok(_) => {
                         stats.downloads_ok.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(e) => {
                         stats.downloads_err.fetch_add(1, Ordering::Relaxed);
-                        warn!(artifact_id, error = %e, "download failed");
+                        warn!(artifact_id = %task.artifact_id, error = %e, "download failed");
                         // Mark as failed so we don't retry endlessly
                         let conn = db.lock().await;
                         let _ = conn.execute(
                             "UPDATE artifacts SET status = 'download_failed', error_text = ?1, updated_at = ?2 WHERE artifact_id = ?3",
-                            rusqlite::params![format!("{e:#}"), now_iso(), artifact_id],
+                            rusqlite::params![format!("{e:#}"), now_iso(), &task.artifact_id],
                         );
                     }
                 }
@@ -508,7 +520,7 @@ async fn download_loop(
     }
 }
 
-async fn find_downloadable(db: &Db, limit: usize) -> Result<Vec<(String, String, String, String)>> {
+async fn find_downloadable(db: &Db, limit: usize) -> Result<Vec<DownloadTask>> {
     let conn = db.lock().await;
     let mut stmt = conn.prepare(
         "SELECT artifact_id, source_id, collection_id, metadata_json FROM artifacts
@@ -518,12 +530,12 @@ async fn find_downloadable(db: &Db, limit: usize) -> Result<Vec<(String, String,
     )?;
     let rows = stmt
         .query_map(rusqlite::params![limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+            Ok(DownloadTask {
+                artifact_id: row.get(0)?,
+                source_id: row.get(1)?,
+                collection_id: row.get(2)?,
+                metadata_json: row.get(3)?,
+            })
         })?
         .filter_map(|r| r.ok())
         .collect();
@@ -535,12 +547,9 @@ async fn run_download(
     registry: &SourceRegistry,
     http_client: &reqwest::Client,
     data_dir: &Path,
-    artifact_id: &str,
-    source_id: &str,
-    collection_id: &str,
-    metadata_json: &str,
+    task: &DownloadTask,
 ) -> Result<()> {
-    let metadata: ArtifactMetadata = serde_json::from_str(metadata_json)?;
+    let metadata: ArtifactMetadata = serde_json::from_str(&task.metadata_json)?;
     let discovered = DiscoveredArtifact {
         metadata: metadata.clone(),
     };
@@ -548,16 +557,16 @@ async fn run_download(
     // Download to a local directory
     let artifact_dir = data_dir
         .join("artifacts")
-        .join(sanitize_path(source_id))
-        .join(sanitize_path(collection_id))
-        .join(sanitize_path(artifact_id));
+        .join(sanitize_path(&task.source_id))
+        .join(sanitize_path(&task.collection_id))
+        .join(sanitize_path(&task.artifact_id));
     tokio::fs::create_dir_all(&artifact_dir).await?;
 
     let local = registry
         .fetch(
             http_client,
-            source_id,
-            collection_id,
+            &task.source_id,
+            &task.collection_id,
             &discovered,
             &artifact_dir,
         )
@@ -578,7 +587,7 @@ async fn run_download(
          SET local_path = excluded.local_path, content_sha256 = excluded.content_sha256,
              content_length_bytes = excluded.content_length_bytes, downloaded_at = excluded.downloaded_at",
         rusqlite::params![
-            artifact_id,
+            &task.artifact_id,
             local_path_str,
             metadata.content_sha256.as_deref().unwrap_or(""),
             file_len,
@@ -587,13 +596,13 @@ async fn run_download(
     )?;
     conn.execute(
         "UPDATE artifacts SET status = 'downloaded', updated_at = ?1 WHERE artifact_id = ?2",
-        rusqlite::params![now, artifact_id],
+        rusqlite::params![now, &task.artifact_id],
     )?;
 
     info!(
-        artifact_id,
-        source_id,
-        collection_id,
+        artifact_id = %task.artifact_id,
+        source_id = %task.source_id,
+        collection_id = %task.collection_id,
         bytes = file_len,
         "downloaded"
     );
@@ -617,41 +626,31 @@ async fn parse_loop(
         }
 
         let mut handles = Vec::new();
-        for (artifact_id, source_id, collection_id, metadata_json, local_path) in batch {
+        for task in batch {
             let permit = sem.clone().acquire_owned().await?;
             let db = db.clone();
             let registry = registry.clone();
             let publisher = publisher.clone();
             let stats = stats.clone();
             handles.push(tokio::spawn(async move {
-                let result = run_parse(
-                    &db,
-                    &registry,
-                    &publisher,
-                    &artifact_id,
-                    &source_id,
-                    &collection_id,
-                    &metadata_json,
-                    &local_path,
-                )
-                .await;
+                let result = run_parse(&db, &registry, &publisher, &task).await;
                 match &result {
                     Ok(rows) => {
                         stats.parses_ok.fetch_add(1, Ordering::Relaxed);
                         info!(
-                            artifact_id,
-                            source_id,
-                            collection_id,
+                            artifact_id = %task.artifact_id,
+                            source_id = %task.source_id,
+                            collection_id = %task.collection_id,
                             rows,
                             "parsed"
                         );
                     }
                     Err(e) => {
                         stats.parses_err.fetch_add(1, Ordering::Relaxed);
-                        warn!(artifact_id, error = %e, "parse failed");
+                        warn!(artifact_id = %task.artifact_id, error = %e, "parse failed");
                         let conn = db.lock().await;
                         let parser_version = registry
-                            .parser_version(&source_id)
+                            .parser_version(&task.source_id)
                             .unwrap_or_else(|_| "unknown".to_string());
                         let now = now_iso();
                         let _ = conn.execute(
@@ -659,11 +658,11 @@ async fn parse_loop(
                              VALUES (?1, ?2, 'failed', NULL, NULL, ?3, ?3, ?4)
                              ON CONFLICT (artifact_id, parser_version) DO UPDATE
                              SET status = 'failed', row_count = NULL, summary_json = NULL, completed_at = excluded.completed_at, error_text = excluded.error_text",
-                            rusqlite::params![artifact_id, parser_version, now, format!("{e:#}")],
+                            rusqlite::params![&task.artifact_id, parser_version, now, format!("{e:#}")],
                         );
                         let _ = conn.execute(
                             "UPDATE artifacts SET status = 'parse_failed', error_text = ?1, updated_at = ?2 WHERE artifact_id = ?3",
-                            rusqlite::params![format!("{e:#}"), now, artifact_id],
+                            rusqlite::params![format!("{e:#}"), now, &task.artifact_id],
                         );
                     }
                 }
@@ -676,10 +675,7 @@ async fn parse_loop(
     }
 }
 
-async fn find_parseable(
-    db: &Db,
-    limit: usize,
-) -> Result<Vec<(String, String, String, String, String)>> {
+async fn find_parseable(db: &Db, limit: usize) -> Result<Vec<ParseTask>> {
     let conn = db.lock().await;
     let mut stmt = conn.prepare(
         "SELECT a.artifact_id, a.source_id, a.collection_id, a.metadata_json, d.local_path
@@ -695,13 +691,13 @@ async fn find_parseable(
     )?;
     let rows = stmt
         .query_map(rusqlite::params![limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
+            Ok(ParseTask {
+                artifact_id: row.get(0)?,
+                source_id: row.get(1)?,
+                collection_id: row.get(2)?,
+                metadata_json: row.get(3)?,
+                local_path: row.get(4)?,
+            })
         })?
         .filter_map(|r| r.ok())
         .collect();
@@ -712,14 +708,10 @@ async fn run_parse(
     db: &Db,
     registry: &SourceRegistry,
     publisher: &ClickHousePublisher,
-    artifact_id: &str,
-    source_id: &str,
-    collection_id: &str,
-    metadata_json: &str,
-    local_path: &str,
+    task: &ParseTask,
 ) -> Result<usize> {
-    let metadata: ArtifactMetadata = serde_json::from_str(metadata_json)?;
-    let parser_version = registry.parser_version(source_id)?;
+    let metadata: ArtifactMetadata = serde_json::from_str(&task.metadata_json)?;
+    let parser_version = registry.parser_version(&task.source_id)?;
 
     // Check if already parsed with this version
     {
@@ -727,26 +719,26 @@ async fn run_parse(
         let already: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM parse_runs WHERE artifact_id = ?1 AND parser_version = ?2 AND status = 'succeeded'",
-                rusqlite::params![artifact_id, parser_version],
+                rusqlite::params![&task.artifact_id, parser_version],
                 |row| Ok(row.get::<_, i64>(0)? > 0),
             )
             .unwrap_or(false);
         if already {
             conn.execute(
                 "UPDATE artifacts SET status = 'parsed', updated_at = ?1 WHERE artifact_id = ?2",
-                rusqlite::params![now_iso(), artifact_id],
+                rusqlite::params![now_iso(), &task.artifact_id],
             )?;
             return Ok(0);
         }
     }
 
-    let artifact_path = PathBuf::from(local_path);
+    let artifact_path = PathBuf::from(&task.local_path);
     let artifact = LocalArtifact {
         metadata,
         local_path: artifact_path.clone(),
     };
 
-    let parsed = registry.parse(source_id, collection_id, artifact.clone())?;
+    let parsed = registry.parse(&task.source_id, &task.collection_id, artifact.clone())?;
     let (rows_published, semantic_jobs) = match parsed {
         ParsedArtifact::StructuredRaw {
             artifact: ref local_artifact,
@@ -754,13 +746,13 @@ async fn run_parse(
             let publish = publish_structured_raw_rows(
                 publisher,
                 registry,
-                source_id,
-                collection_id,
+                &task.source_id,
+                &task.collection_id,
                 local_artifact,
             )
             .await?;
             let semantic_jobs = if publish.new_schemas_observed {
-                reconcile_source_semantics(publisher, registry, source_id).await?
+                reconcile_source_semantics(publisher, registry, &task.source_id).await?
             } else {
                 0
             };
@@ -771,9 +763,15 @@ async fn run_parse(
             ref result,
         } => {
             let rows = publisher
-                .publish_raw_plugin_parse_result(source_id, collection_id, local_artifact, result)
+                .publish_raw_plugin_parse_result(
+                    &task.source_id,
+                    &task.collection_id,
+                    local_artifact,
+                    result,
+                )
                 .await?;
-            let semantic_jobs = reconcile_source_semantics(publisher, registry, source_id).await?;
+            let semantic_jobs =
+                reconcile_source_semantics(publisher, registry, &task.source_id).await?;
             (rows, semantic_jobs)
         }
     };
@@ -791,17 +789,17 @@ async fn run_parse(
              VALUES (?1, ?2, 'succeeded', ?3, ?4, ?5, ?5)
              ON CONFLICT (artifact_id, parser_version) DO UPDATE
              SET status = 'succeeded', row_count = excluded.row_count, summary_json = excluded.summary_json, completed_at = excluded.completed_at",
-            rusqlite::params![artifact_id, parser_version, rows_published as i64, summary.to_string(), now],
+            rusqlite::params![&task.artifact_id, parser_version, rows_published as i64, summary.to_string(), now],
         )?;
         conn.execute(
             "UPDATE artifacts SET status = 'parsed', updated_at = ?1 WHERE artifact_id = ?2",
-            rusqlite::params![now, artifact_id],
+            rusqlite::params![now, &task.artifact_id],
         )?;
     }
 
     // Delete the downloaded file to free disk space
     if let Err(e) = cleanup_artifact(&artifact_path).await {
-        warn!(artifact_id, error = %e, "failed to clean up artifact file");
+        warn!(artifact_id = %task.artifact_id, error = %e, "failed to clean up artifact file");
     }
 
     Ok(rows_published)
@@ -995,12 +993,14 @@ impl<'a> ClickHouseRowBatcher<'a> {
         self.published_rows += self
             .publisher
             .publish_prepared_raw_chunk(
-                schema,
-                self.source_id,
-                &self.collection_id,
-                self.artifact_id,
-                self.remote_uri,
-                Utc::now(),
+                RawChunkContext {
+                    schema,
+                    source_id: self.source_id,
+                    collection_id: &self.collection_id,
+                    artifact_id: self.artifact_id,
+                    remote_uri: self.remote_uri,
+                    processed_at: Utc::now(),
+                },
                 &chunk.rows,
             )
             .await?;

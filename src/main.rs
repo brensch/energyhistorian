@@ -1,10 +1,3 @@
-mod clickhouse;
-mod db;
-mod health;
-mod orchestrator;
-mod semantic;
-mod source_registry;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -14,11 +7,11 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::clickhouse::{ClickHouseConfig, ClickHousePublisher};
-use crate::db::open_database;
-use crate::health::{HealthContext, spawn_health_server};
-use crate::orchestrator::{Stats, run_orchestrator};
-use crate::source_registry::SourceRegistry;
+use energyhistorian::clickhouse::{ClickHouseConfig, ClickHousePublisher};
+use energyhistorian::db::open_database;
+use energyhistorian::health::{HealthContext, spawn_health_server};
+use energyhistorian::orchestrator::{OrchestratorConfig, Stats, run_orchestrator};
+use energyhistorian::source_registry::SourceRegistry;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -110,10 +103,12 @@ async fn main() -> Result<()> {
             db,
             registry,
             publisher,
-            args.data_dir,
-            args.discover_concurrency,
-            args.download_concurrency,
-            args.parse_concurrency,
+            OrchestratorConfig {
+                data_dir: args.data_dir,
+                discover_concurrency: args.discover_concurrency,
+                download_concurrency: args.download_concurrency,
+                parse_concurrency: args.parse_concurrency,
+            },
             stats,
         ) => {
             result.context("orchestrator exited")?;

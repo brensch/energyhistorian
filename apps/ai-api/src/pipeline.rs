@@ -739,7 +739,10 @@ fn plan_uses_actual_gen_duid(plan: &Plan) -> bool {
         .any(|item| item == "semantic.actual_gen_duid")
 }
 
-fn filter_registry_for_question(question: &str, registry: &[SemanticObject]) -> Vec<SemanticObject> {
+fn filter_registry_for_question(
+    question: &str,
+    registry: &[SemanticObject],
+) -> Vec<SemanticObject> {
     let lowered_question = question.to_ascii_lowercase();
     let tokens = lowered_question
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -888,7 +891,9 @@ fn build_chart_spec_for_plan(preview: &QueryPreview, plan: &Plan) -> Result<Char
     }
 
     match chart_type.as_str() {
-        "line" | "bar" | "scatter" | "area" => Ok(build_plotly_chart_from_plan(preview, plan, &x, &y)),
+        "line" | "bar" | "scatter" | "area" => {
+            Ok(build_plotly_chart_from_plan(preview, plan, &x, &y))
+        }
         "pie" => Ok(build_plotly_pie_chart(preview, plan, &x, &y[0])),
         "box" => Ok(build_plotly_box_chart(preview, plan, &x, &y[0])),
         _ => bail!("unsupported chart_type `{chart_type}`"),

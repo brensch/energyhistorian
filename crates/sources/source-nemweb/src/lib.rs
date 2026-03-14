@@ -332,6 +332,7 @@ impl NemwebPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn semantic_model(
     source_id: &str,
     object_name: &str,

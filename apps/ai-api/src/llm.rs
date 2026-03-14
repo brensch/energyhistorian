@@ -39,7 +39,8 @@ impl LlmClient {
     }
 
     pub async fn json_completion(&self, system: &str, user: &str) -> Result<CompletionResponse> {
-        self.json_completion_with_max_tokens(system, user, 2048).await
+        self.json_completion_with_max_tokens(system, user, 2048)
+            .await
     }
 
     pub async fn json_completion_with_max_tokens(

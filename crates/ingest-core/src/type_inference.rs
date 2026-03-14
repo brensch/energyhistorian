@@ -71,8 +71,6 @@ impl ColumnTypeInference {
                     "Nullable(DateTime64(3, 'UTC'))".to_string()
                 } else if self.found_date[idx] {
                     "Nullable(Date)".to_string()
-                } else if self.found_float[idx] {
-                    "Nullable(Float64)".to_string()
                 } else {
                     "Nullable(Float64)".to_string()
                 }

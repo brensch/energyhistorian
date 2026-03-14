@@ -17,15 +17,16 @@ pub fn plan_raw_table_in_database(database: &str, schema: &ObservedSchema) -> Ra
     let table_name = physical_raw_table_name(schema);
     let full_name = format!("{database}.{table_name}");
 
-    let mut columns = Vec::new();
-    columns.push("\"processed_at\" DateTime64(3) CODEC(Delta(8), LZ4)".to_string());
-    columns.push("\"artifact_id\" String CODEC(ZSTD(6))".to_string());
-    columns.push("\"source_id\" LowCardinality(String) CODEC(ZSTD(6))".to_string());
-    columns.push("\"collection_id\" LowCardinality(String) CODEC(ZSTD(6))".to_string());
-    columns.push("\"schema_hash\" LowCardinality(String) CODEC(ZSTD(6))".to_string());
-    columns.push("\"source_url\" String CODEC(ZSTD(6))".to_string());
-    columns.push("\"archive_entry\" String CODEC(ZSTD(6))".to_string());
-    columns.push("\"row_hash\" UInt64 CODEC(ZSTD(6))".to_string());
+    let mut columns = vec![
+        "\"processed_at\" DateTime64(3) CODEC(Delta(8), LZ4)".to_string(),
+        "\"artifact_id\" String CODEC(ZSTD(6))".to_string(),
+        "\"source_id\" LowCardinality(String) CODEC(ZSTD(6))".to_string(),
+        "\"collection_id\" LowCardinality(String) CODEC(ZSTD(6))".to_string(),
+        "\"schema_hash\" LowCardinality(String) CODEC(ZSTD(6))".to_string(),
+        "\"source_url\" String CODEC(ZSTD(6))".to_string(),
+        "\"archive_entry\" String CODEC(ZSTD(6))".to_string(),
+        "\"row_hash\" UInt64 CODEC(ZSTD(6))".to_string(),
+    ];
 
     for column in &schema.columns {
         let name = quote_ident(&column.name);

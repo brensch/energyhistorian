@@ -409,51 +409,51 @@ fn parse_monthly_metadata(artifact: &LocalArtifact) -> Result<RawPluginParseResu
         }
     }
 
-    if artifact_type == "create_zip" {
-        if let Some(sql) = best_sql_script(&mut zip, "create_mms_data_model.sql")? {
-            let table_columns = parse_table_columns(&sql);
-            let tables_rows =
-                parse_table_comments(&sql, month_key.as_deref(), model_version.as_deref());
-            let column_rows =
-                parse_column_comments(&sql, month_key.as_deref(), model_version.as_deref());
-            let pk_rows = parse_primary_keys(&sql, month_key.as_deref(), model_version.as_deref());
+    if artifact_type == "create_zip"
+        && let Some(sql) = best_sql_script(&mut zip, "create_mms_data_model.sql")?
+    {
+        let table_columns = parse_table_columns(&sql);
+        let tables_rows =
+            parse_table_comments(&sql, month_key.as_deref(), model_version.as_deref());
+        let column_rows =
+            parse_column_comments(&sql, month_key.as_deref(), model_version.as_deref());
+        let pk_rows = parse_primary_keys(&sql, month_key.as_deref(), model_version.as_deref());
 
-            if !tables_rows.is_empty() {
-                tables.push(RawPluginTableBatch {
-                    table_name: "tables".to_string(),
-                    rows: tables_rows,
-                });
-            }
-            if !column_rows.is_empty() {
-                tables.push(RawPluginTableBatch {
-                    table_name: "columns".to_string(),
-                    rows: column_rows,
-                });
-            }
-            if !table_columns.is_empty() {
-                tables.push(RawPluginTableBatch {
-                    table_name: "table_columns".to_string(),
-                    rows: table_columns,
-                });
-            }
-            if !pk_rows.is_empty() {
-                tables.push(RawPluginTableBatch {
-                    table_name: "primary_keys".to_string(),
-                    rows: pk_rows,
-                });
-            }
+        if !tables_rows.is_empty() {
+            tables.push(RawPluginTableBatch {
+                table_name: "tables".to_string(),
+                rows: tables_rows,
+            });
+        }
+        if !column_rows.is_empty() {
+            tables.push(RawPluginTableBatch {
+                table_name: "columns".to_string(),
+                rows: column_rows,
+            });
+        }
+        if !table_columns.is_empty() {
+            tables.push(RawPluginTableBatch {
+                table_name: "table_columns".to_string(),
+                rows: table_columns,
+            });
+        }
+        if !pk_rows.is_empty() {
+            tables.push(RawPluginTableBatch {
+                table_name: "primary_keys".to_string(),
+                rows: pk_rows,
+            });
         }
     }
 
-    if artifact_type == "upgrade_zip" {
-        if let Some(sql) = best_sql_script(&mut zip, "alter_mms_data_model.sql")? {
-            let rows = parse_upgrade_changes(&sql, month_key.as_deref(), model_version.as_deref());
-            if !rows.is_empty() {
-                tables.push(RawPluginTableBatch {
-                    table_name: "upgrade_changes".to_string(),
-                    rows,
-                });
-            }
+    if artifact_type == "upgrade_zip"
+        && let Some(sql) = best_sql_script(&mut zip, "alter_mms_data_model.sql")?
+    {
+        let rows = parse_upgrade_changes(&sql, month_key.as_deref(), model_version.as_deref());
+        if !rows.is_empty() {
+            tables.push(RawPluginTableBatch {
+                table_name: "upgrade_changes".to_string(),
+                rows,
+            });
         }
     }
 

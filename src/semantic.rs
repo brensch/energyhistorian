@@ -199,21 +199,20 @@ async fn reconcile_observed_schema_views(
             latest_view_name = Some(view_name);
         }
 
-        if include_latest_alias {
-            if let Some(latest_view_name) = latest_view_name {
-                if latest_view_name != base_name {
-                    replace_view(
-                        publisher,
-                        &qualified_name(target_database, &base_name),
-                        &format!(
-                            "SELECT * FROM {}",
-                            qualified_name(target_database, &latest_view_name)
-                        ),
-                    )
-                    .await?;
-                    executed += 1;
-                }
-            }
+        if include_latest_alias
+            && let Some(latest_view_name) = latest_view_name
+            && latest_view_name != base_name
+        {
+            replace_view(
+                publisher,
+                &qualified_name(target_database, &base_name),
+                &format!(
+                    "SELECT * FROM {}",
+                    qualified_name(target_database, &latest_view_name)
+                ),
+            )
+            .await?;
+            executed += 1;
         }
     }
 
@@ -315,31 +314,30 @@ async fn build_union_view_sql(
         .collect::<Result<Vec<_>>>()?;
 
     let union_sql = selects.join(" UNION ALL ");
-    if let Some(key_columns) = dedupe_key_columns {
-        if !key_columns.is_empty()
-            && key_columns
-                .iter()
-                .all(|column| preferred_order.iter().any(|candidate| candidate == column))
-        {
-            let projected_columns = preferred_order
-                .iter()
-                .map(|column| format!("`{column}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let partition_by = key_columns
-                .iter()
-                .map(|column| format!("`{column}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Ok(format!(
-                "SELECT {projected_columns} \
+    if let Some(key_columns) = dedupe_key_columns
+        && !key_columns.is_empty()
+        && key_columns
+            .iter()
+            .all(|column| preferred_order.iter().any(|candidate| candidate == column))
+    {
+        let projected_columns = preferred_order
+            .iter()
+            .map(|column| format!("`{column}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let partition_by = key_columns
+            .iter()
+            .map(|column| format!("`{column}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!(
+            "SELECT {projected_columns} \
                  FROM ( \
                      SELECT {projected_columns}, row_number() OVER (PARTITION BY {partition_by} ORDER BY `_source_column_count` DESC, processed_at DESC, artifact_id DESC) AS _dedupe_rank \
                      FROM ({union_sql}) \
                  ) \
                  WHERE _dedupe_rank = 1"
-            ));
-        }
+        ));
     }
 
     if preferred_order.iter().any(|column| column == "row_hash") {

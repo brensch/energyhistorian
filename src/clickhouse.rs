@@ -16,6 +16,9 @@ use tokio::sync::Mutex;
 pub const MAX_INSERT_ROWS: usize = 10_000;
 pub const MAX_INSERT_BYTES: usize = 8 * 1024 * 1024;
 
+type RawTableCacheKey = (String, String);
+type KnownSchemasByDatabase = HashMap<String, HashSet<(String, String)>>;
+
 #[derive(Debug, Clone)]
 pub struct ClickHouseConfig {
     pub url: String,
@@ -23,13 +26,29 @@ pub struct ClickHouseConfig {
     pub password: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RawChunkContext<'a> {
+    pub schema: &'a ObservedSchema,
+    pub source_id: &'a str,
+    pub collection_id: &'a str,
+    pub artifact_id: &'a str,
+    pub remote_uri: &'a str,
+    pub processed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RawRowEncodeContext<'a> {
+    chunk: RawChunkContext<'a>,
+    column_types: &'a [ClickHouseType],
+}
+
 #[derive(Clone)]
 pub struct ClickHousePublisher {
     client: reqwest::Client,
     config: ClickHouseConfig,
     initialized_databases: Arc<Mutex<HashSet<String>>>,
-    known_raw_tables: Arc<Mutex<HashSet<(String, String)>>>,
-    known_schemas: Arc<Mutex<HashMap<String, HashSet<(String, String)>>>>,
+    known_raw_tables: Arc<Mutex<HashSet<RawTableCacheKey>>>,
+    known_schemas: Arc<Mutex<KnownSchemasByDatabase>>,
     semantic_reconcile_lock: Arc<Mutex<()>>,
 }
 
@@ -142,24 +161,10 @@ impl ClickHousePublisher {
 
     pub async fn publish_prepared_raw_chunk(
         &self,
-        schema: &ObservedSchema,
-        source_id: &str,
-        collection_id: &str,
-        artifact_id: &str,
-        remote_uri: &str,
-        processed_at: DateTime<Utc>,
+        chunk: RawChunkContext<'_>,
         rows: &[StructuredRow],
     ) -> Result<usize> {
-        self.publish_raw_chunk(
-            schema,
-            source_id,
-            collection_id,
-            artifact_id,
-            remote_uri,
-            processed_at,
-            rows,
-        )
-        .await
+        self.publish_raw_chunk(chunk, rows).await
     }
 
     async fn ensure_database_initialized(&self, database: &str) -> Result<()> {
@@ -254,7 +259,7 @@ impl ClickHousePublisher {
             }
         }
         if let Err(error) = self
-            .record_observed_schema(&database, source_id, collection_id, physical_table, schema)
+            .record_observed_schema(database, source_id, collection_id, physical_table, schema)
             .await
         {
             let mut known_schemas = self.known_schemas.lock().await;
@@ -268,16 +273,12 @@ impl ClickHousePublisher {
 
     async fn publish_raw_chunk(
         &self,
-        schema: &ObservedSchema,
-        source_id: &str,
-        collection_id: &str,
-        artifact_id: &str,
-        remote_uri: &str,
-        processed_at: DateTime<Utc>,
+        chunk: RawChunkContext<'_>,
         rows: &[StructuredRow],
     ) -> Result<usize> {
-        let plan = plan_raw_table_in_database(&raw_database_name(source_id), schema);
-        let column_types = schema
+        let plan = plan_raw_table_in_database(&raw_database_name(chunk.source_id), chunk.schema);
+        let column_types = chunk
+            .schema
             .columns
             .iter()
             .map(|column| {
@@ -293,7 +294,7 @@ impl ClickHousePublisher {
         let sql = format!(
             "INSERT INTO {} ({}) FORMAT RowBinary",
             plan.full_name,
-            raw_insert_column_list(schema)
+            raw_insert_column_list(chunk.schema)
         );
         let capacity = rows
             .iter()
@@ -301,18 +302,12 @@ impl ClickHousePublisher {
             .sum::<usize>()
             + (rows.len() * 96);
         let mut body = Vec::with_capacity(capacity);
+        let encode_ctx = RawRowEncodeContext {
+            chunk,
+            column_types: &column_types,
+        };
         for row in rows {
-            encode_raw_row(
-                &mut body,
-                schema,
-                source_id,
-                collection_id,
-                artifact_id,
-                remote_uri,
-                processed_at,
-                row,
-                &column_types,
-            )?;
+            encode_raw_row(&mut body, &encode_ctx, row)?;
         }
         self.execute_binary_insert(&sql, body).await?;
 
@@ -708,27 +703,25 @@ fn raw_insert_column_list(schema: &ObservedSchema) -> String {
 
 fn encode_raw_row(
     buffer: &mut Vec<u8>,
-    schema: &ObservedSchema,
-    source_id: &str,
-    collection_id: &str,
-    artifact_id: &str,
-    remote_uri: &str,
-    processed_at: DateTime<Utc>,
+    ctx: &RawRowEncodeContext<'_>,
     row: &StructuredRow,
-    column_types: &[ClickHouseType],
 ) -> Result<()> {
-    encode_datetime64(buffer, processed_at, 3);
-    encode_string(buffer, artifact_id);
-    encode_string(buffer, source_id);
-    encode_string(buffer, collection_id);
-    encode_string(buffer, &schema.schema_key.header_hash);
-    encode_string(buffer, row.source_url.as_deref().unwrap_or(remote_uri));
+    encode_datetime64(buffer, ctx.chunk.processed_at, 3);
+    encode_string(buffer, ctx.chunk.artifact_id);
+    encode_string(buffer, ctx.chunk.source_id);
+    encode_string(buffer, ctx.chunk.collection_id);
+    encode_string(buffer, &ctx.chunk.schema.schema_key.header_hash);
+    encode_string(
+        buffer,
+        row.source_url.as_deref().unwrap_or(ctx.chunk.remote_uri),
+    );
     encode_string(buffer, row.archive_entry.as_deref().unwrap_or(""));
     buffer.extend_from_slice(&row_hash_value(row).to_le_bytes());
 
-    for (idx, column) in schema.columns.iter().enumerate() {
+    for (idx, column) in ctx.chunk.schema.columns.iter().enumerate() {
         let value = row.values.get(idx).unwrap_or(&RawValue::Null);
-        let field_type = column_types
+        let field_type = ctx
+            .column_types
             .get(idx)
             .ok_or_else(|| anyhow!("missing parsed type for column {}", column.name))?;
         encode_value(buffer, field_type, value)
@@ -845,11 +838,29 @@ fn encode_value(buffer: &mut Vec<u8>, field_type: &ClickHouseType, value: &RawVa
             let text = match value {
                 RawValue::Null => "",
                 RawValue::String(text) => text.as_str(),
-                RawValue::Int64(number) => return Ok(encode_string(buffer, &number.to_string())),
-                RawValue::Float64(number) => return Ok(encode_string(buffer, &number.to_string())),
-                RawValue::Date(date) => return Ok(encode_string(buffer, &date.to_string())),
+                RawValue::Int64(number) => {
+                    return {
+                        encode_string(buffer, &number.to_string());
+                        Ok(())
+                    };
+                }
+                RawValue::Float64(number) => {
+                    return {
+                        encode_string(buffer, &number.to_string());
+                        Ok(())
+                    };
+                }
+                RawValue::Date(date) => {
+                    return {
+                        encode_string(buffer, &date.to_string());
+                        Ok(())
+                    };
+                }
                 RawValue::DateTime(datetime) => {
-                    return Ok(encode_string(buffer, &datetime.to_rfc3339()));
+                    return {
+                        encode_string(buffer, &datetime.to_rfc3339());
+                        Ok(())
+                    };
                 }
             };
             encode_string(buffer, text);

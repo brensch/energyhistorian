@@ -232,6 +232,7 @@ impl MmsdmPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn semantic_model(
     source_id: &str,
     object_name: &str,
@@ -675,10 +676,10 @@ async fn discover_year_artifacts(
     );
     let mut artifacts = Vec::new();
     for (month_dir, month_key, month_year, month_number) in months {
-        if let Some((cursor_year, cursor_month)) = earliest_month {
-            if (month_year, month_number) < (cursor_year, cursor_month) {
-                continue;
-            }
+        if let Some((cursor_year, cursor_month)) = earliest_month
+            && (month_year, month_number) < (cursor_year, cursor_month)
+        {
+            continue;
         }
         artifacts.extend(
             discover_month_artifacts(

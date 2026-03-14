@@ -1,16 +1,9 @@
-#[path = "../clickhouse.rs"]
-mod clickhouse;
-#[path = "../semantic.rs"]
-mod semantic;
-#[path = "../source_registry.rs"]
-mod source_registry;
-
 use anyhow::Result;
 use clap::Parser;
 
-use crate::clickhouse::{ClickHouseConfig, ClickHousePublisher};
-use crate::semantic::reconcile_source_semantics;
-use crate::source_registry::SourceRegistry;
+use energyhistorian::clickhouse::{ClickHouseConfig, ClickHousePublisher};
+use energyhistorian::semantic::reconcile_source_semantics;
+use energyhistorian::source_registry::SourceRegistry;
 
 #[derive(Debug, Parser)]
 struct Args {
