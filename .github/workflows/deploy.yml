@@ -21,6 +21,7 @@ jobs:
     env:
       DEPLOY_BRANCH: main
       DEPLOY_PATH: /srv/energyhistorian
+      DEPLOY_PROFILE: ai
     steps:
       - name: Validate deploy path
         run: |
@@ -45,4 +46,4 @@ jobs:
           git checkout "${DEPLOY_BRANCH}"
           git reset --hard "origin/${DEPLOY_BRANCH}"
 
-          "${compose_cmd[@]}" up -d --build --remove-orphans
+          "${compose_cmd[@]}" --profile "${DEPLOY_PROFILE}" up -d --build --remove-orphans
