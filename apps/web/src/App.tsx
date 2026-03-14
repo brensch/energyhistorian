@@ -30,6 +30,16 @@ const SUGGESTED_QUESTIONS = [
   'How did VIC1 and SA1 prices compare yesterday?',
 ];
 
+function initialsForUser(name?: string | null, firstName?: string | null, lastName?: string | null) {
+  const source =
+    [firstName, lastName].filter(Boolean).join(' ').trim() || (name ?? '').trim() || 'User';
+  const parts = source.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return `${parts[0][0] ?? ''}${parts[1][0] ?? ''}`.toUpperCase();
+}
+
 function conversationIdFromHash(hash: string) {
   const value = hash.replace(/^#/, '').trim();
   return value || null;
@@ -37,6 +47,8 @@ function conversationIdFromHash(hash: string) {
 
 export default function App() {
   const auth = useAppAuth();
+  const hasDevHeaders = Boolean(auth.headers['X-Dev-User-Id']);
+  const hasBearerToken = Boolean(auth.headers.Authorization);
   const [me, setMe] = useState<MeResponse | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(() => {
@@ -50,12 +62,14 @@ export default function App() {
   const [liveRun, setLiveRun] = useState<LiveRunState | null>(null);
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const profileUser = me?.user ?? auth.user;
 
   useEffect(() => {
-    if (!auth.ready || !auth.isAuthenticated) {
-      if (!auth.headers['X-Dev-User-Id']) {
-        return;
-      }
+    if (!auth.ready) {
+      return;
+    }
+    if (!hasDevHeaders && (!auth.isAuthenticated || !hasBearerToken)) {
+      return;
     }
 
     let cancelled = false;
@@ -85,9 +99,12 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [auth.headers, auth.isAuthenticated, auth.ready]);
+  }, [auth.headers, auth.isAuthenticated, auth.ready, hasBearerToken, hasDevHeaders]);
 
   useEffect(() => {
+    if (!hasDevHeaders && !hasBearerToken) {
+      return;
+    }
     if (!activeConversationId) {
       setMessages([]);
       return;
@@ -112,7 +129,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeConversationId, auth.headers]);
+  }, [activeConversationId, auth.headers, hasBearerToken, hasDevHeaders]);
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -403,12 +420,29 @@ export default function App() {
             </div>
           </div>
 
-          <div className="mt-4 border-t border-neutral-800 pt-4">
-            <div className="text-sm font-medium text-neutral-200">
-              {me?.user.name ?? auth.user?.name}
-            </div>
-            <div className="mt-1 text-xs text-neutral-500">
-              {me?.user.email ?? auth.user?.email}
+            <div className="mt-4 border-t border-neutral-800 pt-4">
+            <div className="flex items-center gap-3">
+              {profileUser?.profile_picture_url ? (
+                <img
+                  alt={profileUser.name}
+                  className="h-11 w-11 rounded-2xl border border-neutral-800 object-cover"
+                  src={profileUser.profile_picture_url}
+                />
+              ) : (
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-neutral-800 bg-neutral-950 text-sm font-semibold text-neutral-200">
+                  {initialsForUser(
+                    profileUser?.name,
+                    profileUser?.first_name,
+                    profileUser?.last_name,
+                  )}
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-neutral-200">
+                  {profileUser?.name}
+                </div>
+                <div className="mt-1 truncate text-xs text-neutral-500">{profileUser?.email}</div>
+              </div>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               <button

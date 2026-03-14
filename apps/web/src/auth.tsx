@@ -29,6 +29,9 @@ const DEV_USER: AuthUser = {
   id: appConfig.devUserId,
   email: appConfig.devUserEmail,
   name: appConfig.devUserName,
+  first_name: 'Dev',
+  last_name: 'User',
+  profile_picture_url: null,
   org_id: appConfig.devOrgId,
   role: 'admin',
   permissions: [],
@@ -52,6 +55,7 @@ function WorkosBoundary({ children }: PropsWithChildren) {
       email?: string;
       firstName?: string;
       lastName?: string;
+      profilePictureUrl?: string;
       organizationId?: string;
     } | null;
     signIn: () => Promise<void>;
@@ -60,6 +64,7 @@ function WorkosBoundary({ children }: PropsWithChildren) {
     getAccessToken: () => Promise<string | null>;
   };
   const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -75,11 +80,24 @@ function WorkosBoundary({ children }: PropsWithChildren) {
     async function syncToken() {
       if (!user) {
         setAccessToken(null);
+        setAuthError(null);
         return;
       }
-      const token = await getAccessToken();
-      if (!cancelled) {
+      try {
+        const token = await getAccessToken();
+        if (cancelled) {
+          return;
+        }
         setAccessToken(token);
+        setAuthError(token ? null : 'Signed in, but no WorkOS access token is available yet.');
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setAccessToken(null);
+        setAuthError(
+          error instanceof Error ? error.message : 'Failed to fetch WorkOS access token.',
+        );
       }
     }
     void syncToken();
@@ -100,6 +118,9 @@ function WorkosBoundary({ children }: PropsWithChildren) {
               [user.firstName, user.lastName].filter(Boolean).join(' ') ||
               user.email ||
               'Unknown user',
+            first_name: user.firstName ?? null,
+            last_name: user.lastName ?? null,
+            profile_picture_url: user.profilePictureUrl ?? null,
             org_id: user.organizationId ?? '',
             role: '',
             permissions: [],
@@ -108,7 +129,7 @@ function WorkosBoundary({ children }: PropsWithChildren) {
           }
         : null,
       accessToken,
-      authError: null,
+      authError,
       signIn: () => {
         void signIn();
       },
@@ -119,7 +140,7 @@ function WorkosBoundary({ children }: PropsWithChildren) {
         ? { Authorization: `Bearer ${accessToken}` }
         : ({} as Record<string, string>),
     }),
-    [accessToken, isLoading, signIn, signOut, user],
+    [accessToken, authError, isLoading, signIn, signOut, user],
   );
 
   return <AuthContextProvider value={session}>{children}</AuthContextProvider>;

@@ -319,19 +319,26 @@ async fn run_discover(
         )?;
     }
 
-    // Update schedule next_discovery_at
+    // Update schedule next_discovery_at.
+    // If we discovered new artifacts, reschedule quickly (10s) to continue
+    // processing remaining months. Otherwise use the normal poll interval.
     let poll_interval: i64 = conn.query_row(
         "SELECT poll_interval_seconds FROM schedules WHERE source_id = ?1 AND collection_id = ?2",
         rusqlite::params![source_id, collection_id],
         |row| row.get(0),
     )?;
-    let stagger_offset =
-        stable_stagger_offset(source_id, collection_id, poll_interval.max(1) as u64) as i64;
-    let next = next_staggered_discovery_at(
-        Utc::now(),
-        poll_interval.max(1) as u64,
-        stagger_offset.max(0) as u64,
-    );
+    let next = if inserted > 0 {
+        // More work likely remains — come back soon.
+        Utc::now() + chrono::Duration::seconds(10)
+    } else {
+        let stagger_offset =
+            stable_stagger_offset(source_id, collection_id, poll_interval.max(1) as u64) as i64;
+        next_staggered_discovery_at(
+            Utc::now(),
+            poll_interval.max(1) as u64,
+            stagger_offset.max(0) as u64,
+        )
+    };
     conn.execute(
         "UPDATE schedules SET next_discovery_at = ?1, last_discovery_at = ?2, last_success_at = ?2, last_error_at = NULL, consecutive_failures = 0
          WHERE source_id = ?3 AND collection_id = ?4",

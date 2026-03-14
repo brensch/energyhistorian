@@ -60,9 +60,23 @@ impl Store {
         )
         .await?;
         tx.execute(
-            "INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
-             ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name, updated_at = now()",
-            &[&user.id, &user.email, &user.name],
+            "INSERT INTO users (id, email, name, first_name, last_name, profile_picture_url)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE
+             SET email = EXCLUDED.email,
+                 name = EXCLUDED.name,
+                 first_name = EXCLUDED.first_name,
+                 last_name = EXCLUDED.last_name,
+                 profile_picture_url = EXCLUDED.profile_picture_url,
+                 updated_at = now()",
+            &[
+                &user.id,
+                &user.email,
+                &user.name,
+                &user.first_name,
+                &user.last_name,
+                &user.profile_picture_url,
+            ],
         )
         .await?;
         tx.execute(

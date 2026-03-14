@@ -2,6 +2,9 @@ export interface AuthUser {
   id: string;
   email: string;
   name: string;
+  first_name: string | null;
+  last_name: string | null;
+  profile_picture_url: string | null;
   org_id: string;
   role: string;
   permissions: string[];

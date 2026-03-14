@@ -10,6 +10,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::{error::AppError, models::AuthUser, state::AppState};
 
@@ -49,8 +50,11 @@ struct Jwk {
 #[derive(Debug, Deserialize)]
 struct Claims {
     sub: String,
-    email: String,
+    email: Option<String>,
     name: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    profile_picture_url: Option<String>,
     org_id: Option<String>,
     role: Option<String>,
     permissions: Option<Vec<String>>,
@@ -83,22 +87,44 @@ impl WorkosAuth {
         validation.set_audience(&[self.audience.clone()]);
         validation.set_issuer(&[self.issuer.clone()]);
         validation.validate_exp = true;
-        let token: TokenData<Claims> = decode(token, key, &validation)?;
-        let claims = token.claims;
-        let email = claims.email.to_lowercase();
+        let decoded: TokenData<Claims> = decode(token, key, &validation)?;
+        let claims = decoded.claims;
+        let email = claims
+            .email
+            .unwrap_or_else(|| format!("{}@workos.invalid", claims.sub));
+        let normalized_email = email.to_lowercase();
+        let first_name = claims.first_name;
+        let last_name = claims.last_name;
+        let name = claims.name.unwrap_or_else(|| {
+            match (&first_name, &last_name) {
+                (Some(first), Some(last)) => {
+                    format!("{first} {last}").trim().to_string()
+                }
+                (Some(first), None) => first.clone(),
+                (None, Some(last)) => last.clone(),
+                (None, None) => normalized_email.clone(),
+            }
+        });
+        let org_id = claims
+            .org_id
+            .unwrap_or_else(|| format!("personal_{}", claims.sub));
         Ok(AuthUser {
             id: claims.sub,
-            email: claims.email,
-            name: claims.name.unwrap_or_else(|| email.clone()),
-            org_id: claims.org_id.unwrap_or_default(),
+            email,
+            name,
+            first_name,
+            last_name,
+            profile_picture_url: claims.profile_picture_url,
+            org_id,
             role: claims.role.unwrap_or_default(),
             permissions: claims.permissions.unwrap_or_default(),
             session_id: claims.sid.unwrap_or_default(),
-            is_admin: self.admin_emails.contains(&email),
+            is_admin: self.admin_emails.contains(&normalized_email),
         })
     }
 
     async fn keys(&self) -> Result<HashMap<String, DecodingKey>> {
+        let openid = self.openid_config().await?;
         {
             let cache = self.jwks.read().await;
             if cache
@@ -111,17 +137,6 @@ impl WorkosAuth {
             }
         }
 
-        let openid = self
-            .client
-            .get(format!(
-                "{}/.well-known/openid-configuration",
-                self.issuer.trim_end_matches('/')
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<OpenIdConfig>()
-            .await?;
         let jwks = self
             .client
             .get(openid.jwks_uri)
@@ -150,6 +165,20 @@ impl WorkosAuth {
         Ok(keys)
     }
 
+    async fn openid_config(&self) -> Result<OpenIdConfig> {
+        self.client
+            .get(format!(
+                "{}/.well-known/openid-configuration",
+                self.issuer.trim_end_matches('/')
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<OpenIdConfig>()
+            .await
+            .context("fetching WorkOS OpenID configuration")
+    }
+
     fn dev_user(parts: &Parts) -> AuthUser {
         let header_value = |name: &str, fallback: &str| {
             parts
@@ -164,6 +193,9 @@ impl WorkosAuth {
             id: header_value("X-Dev-User-Id", "dev-user"),
             email: header_value("X-Dev-User-Email", "dev@example.com"),
             name: header_value("X-Dev-User-Name", "Developer"),
+            first_name: Some("Dev".to_string()),
+            last_name: Some("User".to_string()),
+            profile_picture_url: None,
             org_id: header_value("X-Dev-Org-Id", "dev-org"),
             role: header_value("X-Dev-Role", "admin"),
             permissions: Vec::new(),
@@ -190,15 +222,18 @@ where
         let token = auth_header
             .and_then(|value: &HeaderValue| value.to_str().ok())
             .and_then(|value: &str| value.strip_prefix("Bearer "))
-            .ok_or(AppError::Unauthorized)?;
+            .ok_or_else(|| {
+                warn!("request missing bearer token");
+                AppError::Unauthorized
+            })?;
         let user = app_state
             .auth
             .verify_bearer(token)
             .await
-            .map_err(|_| AppError::Unauthorized)?;
-        if user.org_id.is_empty() {
-            return Err(AppError::Internal(anyhow!("user org_id missing")));
-        }
+            .map_err(|error| {
+                warn!(error = %error, "bearer token verification failed");
+                AppError::Unauthorized
+            })?;
         Ok(Self(user))
     }
 }

@@ -9,9 +9,16 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
+    first_name TEXT,
+    last_name TEXT,
+    profile_picture_url TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture_url TEXT;
 
 CREATE TABLE IF NOT EXISTS memberships (
     org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
