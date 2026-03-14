@@ -16,8 +16,6 @@ services:
       DISCOVER_CONCURRENCY: "4"
       DOWNLOAD_CONCURRENCY: "4"
       PARSE_CONCURRENCY: "4"
-    ports:
-      - "8080:8080"
     volumes:
       - ./data:/data
 
