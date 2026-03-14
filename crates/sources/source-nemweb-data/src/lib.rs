@@ -20,15 +20,15 @@ use ingest_core::{
 pub use ingest::{ArchiveManifest, NemwebIngestResult, ParsedTableBatch};
 
 #[derive(Clone)]
-pub struct NemwebPlugin;
+pub struct NemwebDataPlugin;
 
-impl Default for NemwebPlugin {
+impl Default for NemwebDataPlugin {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl NemwebPlugin {
+impl NemwebDataPlugin {
     pub fn new() -> Self {
         Self
     }
@@ -82,7 +82,7 @@ impl NemwebPlugin {
     fn semantic_models(&self) -> Vec<SemanticModel> {
         vec![
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.dispatch_price",
                 "Regional 5-minute energy and FCAS price outcomes by settlement interval.",
                 "one row per settlement interval per region",
@@ -104,7 +104,7 @@ impl NemwebPlugin {
                 &["price", "volatility", "fcas", "region", "spread"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.daily_region_dispatch",
                 "Regional dispatch outcomes, demand, interchange, available generation, and regional FCAS enablement by settlement interval.",
                 "one row per settlement interval per region",
@@ -132,7 +132,7 @@ impl NemwebPlugin {
                 &["demand", "dispatch", "region", "imports", "fcas", "price"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.daily_unit_dispatch",
                 "Unit-level dispatch targets, availability, ramp rates, and FCAS enablement by settlement interval.",
                 "one row per settlement interval per DUID",
@@ -158,7 +158,7 @@ impl NemwebPlugin {
                 &["duid", "dispatch", "ramp", "battery", "fcas"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.dispatch_unit_solution",
                 "Richer unit dispatch solution surface including UIGF, storage, and semi-scheduled fields by settlement interval.",
                 "one row per settlement interval per DUID",
@@ -177,7 +177,7 @@ impl NemwebPlugin {
                 &["curtailment", "uigt", "semi-scheduled", "storage"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.actual_gen_duid",
                 "Metered actual generation or energy readings by interval and DUID.",
                 "one row per interval per DUID",
@@ -191,7 +191,7 @@ impl NemwebPlugin {
                 &["generation", "actual", "duid", "metered"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.dispatch_unit_scada",
                 "SCADA telemetry values by settlement interval and DUID.",
                 "one row per settlement interval per DUID",
@@ -203,7 +203,7 @@ impl NemwebPlugin {
                 &["scada", "telemetry", "generator"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.dispatch_interconnectorres",
                 "Interconnector dispatch results including flow, metered flow, limits, losses, and marginal value.",
                 "one row per settlement interval per interconnector",
@@ -224,7 +224,7 @@ impl NemwebPlugin {
                 &["interconnector", "flow", "limit", "loss", "spread"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.dispatch_constraint",
                 "Constraint outcomes by settlement interval and constraint identifier.",
                 "one row per settlement interval per constraint",
@@ -238,7 +238,7 @@ impl NemwebPlugin {
                 &["constraint", "binding", "shadow price"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.predispatch_region_prices",
                 "Predispatch regional price forecasts.",
                 "one row per forecast interval per region",
@@ -252,7 +252,7 @@ impl NemwebPlugin {
                 &["forecast", "predispatch", "price"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.p5min_regionsolution",
                 "5-minute ahead regional forecast and solution outputs by run time and target interval.",
                 "one row per target interval, run time, and region",
@@ -266,7 +266,7 @@ impl NemwebPlugin {
                 &["forecast", "p5", "price", "demand"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.bid_dayoffer",
                 "Daily bid price bands and rebid explanations by DUID, participant, and bid type.",
                 "one row per settlement day per DUID per participant per bid type",
@@ -293,7 +293,7 @@ impl NemwebPlugin {
                 &["bids", "rebid", "offers", "fuel"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.bid_peroffer",
                 "Interval bid availabilities by DUID and bid type.",
                 "one row per interval per DUID per bid type",
@@ -317,7 +317,7 @@ impl NemwebPlugin {
                 &["bids", "availability", "offers"],
             ),
             semantic_model(
-                "aemo.nemweb",
+                "aemo.nemweb.data",
                 "semantic.marginal_loss_factors",
                 "Marginal loss factor reference surface by DUID and connection point.",
                 "one row per effective date per DUID or connection point",
@@ -366,10 +366,10 @@ fn semantic_model(
     }
 }
 
-impl SourcePlugin for NemwebPlugin {
+impl SourcePlugin for NemwebDataPlugin {
     fn descriptor(&self) -> SourceDescriptor {
         SourceDescriptor {
-            source_id: "aemo.nemweb".to_string(),
+            source_id: "aemo.nemweb.data".to_string(),
             domain: "electricity".to_string(),
             description: "AEMO NEMweb current/archive market report families.".to_string(),
             versioned_metadata: true,
@@ -568,14 +568,14 @@ impl SourcePlugin for NemwebPlugin {
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "nemweb_table_locator".to_string(),
-                required_objects: vec!["raw_aemo_nemweb.observed_schemas".to_string()],
-                sql: "SELECT logical_section, logical_table, report_version, physical_table, 'raw_aemo_nemweb' AS database_name, column_count, schema_hash, first_seen_at, last_seen_at FROM raw_aemo_nemweb.observed_schemas WHERE physical_table != '' GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash, first_seen_at, last_seen_at".to_string(),
+                required_objects: vec!["raw_aemo_nemweb_data.observed_schemas".to_string()],
+                sql: "SELECT logical_section, logical_table, report_version, physical_table, 'raw_aemo_nemweb_data' AS database_name, column_count, schema_hash, first_seen_at, last_seen_at FROM raw_aemo_nemweb_data.observed_schemas WHERE physical_table != '' GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash, first_seen_at, last_seen_at".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "nemweb_schema_registry".to_string(),
-                required_objects: vec!["raw_aemo_nemweb.observed_schemas".to_string()],
-                sql: "SELECT DISTINCT logical_section, logical_table, report_version, physical_table, column_count, schema_hash, min(first_seen_at) AS first_seen, max(last_seen_at) AS last_seen FROM raw_aemo_nemweb.observed_schemas GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash".to_string(),
+                required_objects: vec!["raw_aemo_nemweb_data.observed_schemas".to_string()],
+                sql: "SELECT DISTINCT logical_section, logical_table, report_version, physical_table, column_count, schema_hash, min(first_seen_at) AS first_seen, max(last_seen_at) AS last_seen FROM raw_aemo_nemweb_data.observed_schemas GROUP BY logical_section, logical_table, report_version, physical_table, column_count, schema_hash".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
@@ -674,9 +674,9 @@ impl SourcePlugin for NemwebPlugin {
     }
 }
 
-impl RuntimeSourcePlugin for NemwebPlugin {
+impl RuntimeSourcePlugin for NemwebDataPlugin {
     fn parser_version(&self) -> &'static str {
-        "source-nemweb/0.1"
+        "source-nemweb-data/0.1"
     }
 
     fn discover_collection_async<'a>(

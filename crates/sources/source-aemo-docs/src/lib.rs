@@ -20,9 +20,9 @@ use ingest_core::{
 use crate::catalog::AemoCatalog;
 
 #[derive(Clone)]
-pub struct AemoMetadataHtmlPlugin;
+pub struct AemoDocsPlugin;
 
-impl AemoMetadataHtmlPlugin {
+impl AemoDocsPlugin {
     pub fn new() -> Self {
         Self
     }
@@ -70,16 +70,16 @@ impl AemoMetadataHtmlPlugin {
     }
 }
 
-impl Default for AemoMetadataHtmlPlugin {
+impl Default for AemoDocsPlugin {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SourcePlugin for AemoMetadataHtmlPlugin {
+impl SourcePlugin for AemoDocsPlugin {
     fn descriptor(&self) -> SourceDescriptor {
         SourceDescriptor {
-            source_id: "aemo_metadata_html".to_string(),
+            source_id: "aemo.docs".to_string(),
             domain: "metadata".to_string(),
             description: "AEMO HTML metadata supplements for current model and reference pages."
                 .to_string(),
@@ -203,20 +203,20 @@ impl SourcePlugin for AemoMetadataHtmlPlugin {
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "column_descriptions".to_string(),
-                required_objects: vec!["raw_aemo_metadata_html.column_explanations".to_string()],
-                sql: "SELECT * FROM raw_aemo_metadata_html.column_explanations".to_string(),
+                required_objects: vec!["raw_aemo_docs.column_explanations".to_string()],
+                sql: "SELECT * FROM raw_aemo_docs.column_explanations".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "table_descriptions".to_string(),
-                required_objects: vec!["raw_aemo_metadata_html.table_explanations".to_string()],
-                sql: "SELECT * FROM raw_aemo_metadata_html.table_explanations".to_string(),
+                required_objects: vec!["raw_aemo_docs.table_explanations".to_string()],
+                sql: "SELECT * FROM raw_aemo_docs.table_explanations".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "population_dates".to_string(),
-                required_objects: vec!["raw_aemo_metadata_html.population_dates".to_string()],
-                sql: "SELECT * FROM raw_aemo_metadata_html.population_dates".to_string(),
+                required_objects: vec!["raw_aemo_docs.population_dates".to_string()],
+                sql: "SELECT * FROM raw_aemo_docs.population_dates".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
@@ -246,9 +246,9 @@ impl SourcePlugin for AemoMetadataHtmlPlugin {
     }
 }
 
-impl RuntimeSourcePlugin for AemoMetadataHtmlPlugin {
+impl RuntimeSourcePlugin for AemoDocsPlugin {
     fn parser_version(&self) -> &'static str {
-        "source-aemo-metadata/0.1"
+        "source-aemo-docs/0.1"
     }
 
     fn discover_collection_async<'a>(

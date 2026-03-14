@@ -167,6 +167,26 @@ async fn sync_schedules(db: &Db, seeds: &[ScheduleSeed]) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn seed_registry_schedules(db: &Db, registry: &SourceRegistry) -> Result<()> {
+    let seeds = registry.schedule_seeds();
+    sync_schedules(db, &seeds).await
+}
+
+pub(crate) async fn force_schedule_due_now(
+    db: &Db,
+    source_id: &str,
+    collection_id: &str,
+) -> Result<()> {
+    let conn = db.lock().await;
+    conn.execute(
+        "UPDATE schedules
+         SET next_discovery_at = ?1
+         WHERE source_id = ?2 AND collection_id = ?3",
+        rusqlite::params![now_iso(), source_id, collection_id],
+    )?;
+    Ok(())
+}
+
 async fn recover_interrupted(db: &Db, data_dir: &Path) -> Result<()> {
     let conn = db.lock().await;
     // Find downloaded artifacts where the file no longer exists
@@ -202,6 +222,10 @@ async fn recover_interrupted(db: &Db, data_dir: &Path) -> Result<()> {
     }
     let _ = data_dir; // used for context only
     Ok(())
+}
+
+pub(crate) async fn recover_interrupted_artifacts(db: &Db, data_dir: &Path) -> Result<()> {
+    recover_interrupted(db, data_dir).await
 }
 
 // ── Discover Loop ──────────────────────────────────────────────────
@@ -345,6 +369,19 @@ async fn run_discover(
         rusqlite::params![next.to_rfc3339(), now, source_id, collection_id],
     )?;
 
+    Ok(inserted)
+}
+
+pub(crate) async fn run_due_discover_batch(
+    db: &Db,
+    registry: &SourceRegistry,
+    http_client: &reqwest::Client,
+) -> Result<usize> {
+    let due = find_due_schedules(db).await?;
+    let mut inserted = 0usize;
+    for (source_id, collection_id) in due {
+        inserted += run_discover(db, registry, http_client, &source_id, &collection_id).await?;
+    }
     Ok(inserted)
 }
 
@@ -616,6 +653,21 @@ async fn run_download(
     Ok(())
 }
 
+pub(crate) async fn run_download_batch(
+    db: &Db,
+    registry: &SourceRegistry,
+    http_client: &reqwest::Client,
+    data_dir: &Path,
+    limit: usize,
+) -> Result<usize> {
+    let batch = find_downloadable(db, limit).await?;
+    let count = batch.len();
+    for task in batch {
+        run_download(db, registry, http_client, data_dir, &task).await?;
+    }
+    Ok(count)
+}
+
 // ── Parse Loop ──────────────────────────────────────────────────
 
 async fn parse_loop(
@@ -810,6 +862,20 @@ async fn run_parse(
     }
 
     Ok(rows_published)
+}
+
+pub(crate) async fn run_parse_batch(
+    db: &Db,
+    registry: &SourceRegistry,
+    publisher: &ClickHousePublisher,
+    limit: usize,
+) -> Result<usize> {
+    let batch = find_parseable(db, limit).await?;
+    let mut rows = 0usize;
+    for task in batch {
+        rows += run_parse(db, registry, publisher, &task).await?;
+    }
+    Ok(rows)
 }
 
 async fn cleanup_artifact(path: &Path) -> Result<()> {
@@ -1042,4 +1108,337 @@ fn next_staggered_discovery_at(
         next_ts += interval;
     }
     DateTime::<Utc>::from_timestamp(next_ts, 0).unwrap_or(now + chrono::Duration::seconds(interval))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Result, bail};
+    use chrono::Utc;
+    use ingest_core::{
+        ArtifactKind, ArtifactMetadata, BoxedFuture, CollectionCompletion, CompletionUnit,
+        DiscoveredArtifact, DiscoveryCursorHint, DiscoveryRequest, LocalArtifact, ParseResult,
+        PluginCapabilities, PromotionSpec, RawTableRowSink, RunContext, RuntimePluginParseResult,
+        RuntimeSourcePlugin, SourceCollection, SourceDescriptor, SourceMetadataDocument,
+        SourcePlugin, StructuredRawEventSink, TaskBlueprint, TaskKind,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::db::{Db, open_database};
+    use crate::source_registry::SourceRegistry;
+
+    #[derive(Clone)]
+    struct FakeDiscoverPlugin {
+        source_id: &'static str,
+        collection_id: &'static str,
+        artifacts: Vec<DiscoveredArtifact>,
+    }
+
+    impl SourcePlugin for FakeDiscoverPlugin {
+        fn descriptor(&self) -> SourceDescriptor {
+            SourceDescriptor {
+                source_id: self.source_id.to_string(),
+                domain: "test".to_string(),
+                description: "test plugin".to_string(),
+                versioned_metadata: true,
+                historical_backfill_supported: true,
+            }
+        }
+
+        fn capabilities(&self) -> PluginCapabilities {
+            PluginCapabilities {
+                supports_backfill: true,
+                supports_schema_registry: false,
+                supports_historical_media: false,
+                notes: Vec::new(),
+            }
+        }
+
+        fn collections(&self) -> Vec<SourceCollection> {
+            vec![SourceCollection {
+                id: self.collection_id.to_string(),
+                display_name: "Test".to_string(),
+                description: "Test collection".to_string(),
+                retrieval_modes: vec!["discover".to_string()],
+                completion: CollectionCompletion {
+                    unit: CompletionUnit::Artifact,
+                    dedupe_keys: vec!["artifact_id".to_string()],
+                    cursor_field: Some("published_at".to_string()),
+                    mutable_window_seconds: Some(60),
+                    notes: Vec::new(),
+                },
+                task_blueprints: vec![TaskBlueprint {
+                    kind: TaskKind::Discover,
+                    description: "discover".to_string(),
+                    max_concurrency: 1,
+                    queue: "discover".to_string(),
+                    idempotency_scope: "artifact".to_string(),
+                }],
+                default_poll_interval_seconds: Some(300),
+            }]
+        }
+
+        fn metadata_catalog(&self) -> Vec<SourceMetadataDocument> {
+            Vec::new()
+        }
+
+        fn discover(
+            &self,
+            _request: &DiscoveryRequest,
+            _ctx: &RunContext,
+        ) -> Result<Vec<DiscoveredArtifact>> {
+            bail!("unused")
+        }
+
+        fn fetch(
+            &self,
+            _artifact: &DiscoveredArtifact,
+            _ctx: &RunContext,
+        ) -> Result<LocalArtifact> {
+            bail!("unused")
+        }
+
+        fn inspect_parse(
+            &self,
+            _artifact: &LocalArtifact,
+            _ctx: &RunContext,
+        ) -> Result<ParseResult> {
+            bail!("unused")
+        }
+
+        fn stream_parse(
+            &self,
+            _artifact: &LocalArtifact,
+            _ctx: &RunContext,
+            _sink: &mut dyn RawTableRowSink,
+        ) -> Result<()> {
+            bail!("unused")
+        }
+
+        fn promotion_plan(&self) -> &'static [PromotionSpec] {
+            &[]
+        }
+    }
+
+    impl RuntimeSourcePlugin for FakeDiscoverPlugin {
+        fn parser_version(&self) -> &'static str {
+            "fake/0.1"
+        }
+
+        fn discover_collection_async<'a>(
+            &'a self,
+            _client: &'a reqwest::Client,
+            collection_id: &'a str,
+            _limit: usize,
+            _cursor: &'a DiscoveryCursorHint,
+            _ctx: &'a RunContext,
+        ) -> BoxedFuture<'a, Result<Vec<DiscoveredArtifact>>> {
+            Box::pin(async move {
+                if collection_id != self.collection_id {
+                    bail!("unexpected collection");
+                }
+                Ok(self.artifacts.clone())
+            })
+        }
+
+        fn fetch_artifact_async<'a>(
+            &'a self,
+            _client: &'a reqwest::Client,
+            _collection_id: &'a str,
+            _artifact: &'a DiscoveredArtifact,
+            _output_dir: &'a Path,
+        ) -> BoxedFuture<'a, Result<LocalArtifact>> {
+            Box::pin(async move { bail!("unused") })
+        }
+
+        fn parse_artifact_runtime(
+            &self,
+            _collection_id: &str,
+            _artifact: LocalArtifact,
+            _ctx: &RunContext,
+        ) -> Result<RuntimePluginParseResult> {
+            bail!("unused")
+        }
+
+        fn stream_structured_parse_runtime(
+            &self,
+            _artifact: &LocalArtifact,
+            _collection_id: &str,
+            _ctx: &RunContext,
+            _sink: &mut dyn RawTableRowSink,
+        ) -> Result<()> {
+            bail!("unused")
+        }
+
+        fn stream_structured_parse_events_runtime(
+            &self,
+            _artifact: &LocalArtifact,
+            _collection_id: &str,
+            _ctx: &RunContext,
+            _sink: &mut dyn StructuredRawEventSink,
+        ) -> Result<()> {
+            bail!("unused")
+        }
+    }
+
+    fn artifact(id: &str, source_id: &str) -> DiscoveredArtifact {
+        DiscoveredArtifact {
+            metadata: ArtifactMetadata {
+                artifact_id: id.to_string(),
+                source_id: source_id.to_string(),
+                acquisition_uri: format!("https://example.com/{id}.zip"),
+                discovered_at: Utc::now(),
+                fetched_at: None,
+                published_at: Some(Utc::now()),
+                content_sha256: None,
+                content_length_bytes: None,
+                kind: ArtifactKind::ZipArchive,
+                parser_version: "fake/0.1".to_string(),
+                model_version: None,
+                release_name: Some("2024-01".to_string()),
+            },
+        }
+    }
+
+    fn temp_db() -> Result<(TempDir, Db)> {
+        let dir = tempfile::tempdir()?;
+        let db = open_database(&dir.path().join("historian.db"))?;
+        Ok((dir, db))
+    }
+
+    async fn insert_artifact_row(
+        db: &Db,
+        artifact_id: &str,
+        source_id: &str,
+        collection_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        let metadata = ArtifactMetadata {
+            artifact_id: artifact_id.to_string(),
+            source_id: source_id.to_string(),
+            acquisition_uri: format!("https://example.com/{artifact_id}.zip"),
+            discovered_at: Utc::now(),
+            fetched_at: None,
+            published_at: Some(Utc::now()),
+            content_sha256: None,
+            content_length_bytes: None,
+            kind: ArtifactKind::ZipArchive,
+            parser_version: "fake/0.1".to_string(),
+            model_version: None,
+            release_name: Some("2024-01".to_string()),
+        };
+        let conn = db.lock().await;
+        conn.execute(
+            "INSERT INTO artifacts (
+                artifact_id, source_id, collection_id, remote_uri, artifact_kind,
+                metadata_json, discovered_at, publication_timestamp, status, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                artifact_id,
+                source_id,
+                collection_id,
+                metadata.acquisition_uri,
+                "ZipArchive",
+                serde_json::to_string(&metadata)?,
+                Utc::now().to_rfc3339(),
+                metadata.published_at.map(|ts| ts.to_rfc3339()),
+                status,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_due_discover_batch_inserts_artifacts_and_reschedules_quickly() -> Result<()> {
+        let (_dir, db) = temp_db()?;
+        let source_id = "test.source";
+        let collection_id = "test-collection";
+        let registry = SourceRegistry::from_plugin_for_test(FakeDiscoverPlugin {
+            source_id,
+            collection_id,
+            artifacts: vec![
+                artifact("artifact-one", source_id),
+                artifact("artifact-two", source_id),
+            ],
+        });
+        let client = reqwest::Client::new();
+
+        seed_registry_schedules(&db, &registry).await?;
+        force_schedule_due_now(&db, source_id, collection_id).await?;
+        let before = Utc::now();
+
+        let inserted = run_due_discover_batch(&db, &registry, &client).await?;
+
+        assert_eq!(inserted, 2);
+        let conn = db.lock().await;
+        let artifact_count: i64 =
+            conn.query_row("SELECT count(*) FROM artifacts", [], |row| row.get(0))?;
+        assert_eq!(artifact_count, 2);
+        let next_discovery_at: String = conn.query_row(
+            "SELECT next_discovery_at FROM schedules WHERE source_id = ?1 AND collection_id = ?2",
+            rusqlite::params![source_id, collection_id],
+            |row| row.get(0),
+        )?;
+        drop(conn);
+
+        let next_discovery_at =
+            chrono::DateTime::parse_from_rfc3339(&next_discovery_at)?.with_timezone(&Utc);
+        assert!(next_discovery_at >= before + chrono::Duration::seconds(9));
+        assert!(next_discovery_at <= before + chrono::Duration::seconds(15));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn find_downloadable_respects_limit() -> Result<()> {
+        let (_dir, db) = temp_db()?;
+        for idx in 0..12 {
+            insert_artifact_row(
+                &db,
+                &format!("artifact-{idx}"),
+                "test.source",
+                "test-collection",
+                "discovered",
+            )
+            .await?;
+        }
+
+        let tasks = find_downloadable(&db, 5).await?;
+
+        assert_eq!(tasks.len(), 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn find_parseable_respects_limit_and_requires_download_rows() -> Result<()> {
+        let (_dir, db) = temp_db()?;
+        for idx in 0..8 {
+            let artifact_id = format!("artifact-{idx}");
+            insert_artifact_row(
+                &db,
+                &artifact_id,
+                "test.source",
+                "test-collection",
+                "downloaded",
+            )
+            .await?;
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO downloads (artifact_id, local_path, content_sha256, content_length_bytes, downloaded_at)
+                 VALUES (?1, ?2, '', 0, ?3)",
+                rusqlite::params![
+                    artifact_id,
+                    PathBuf::from(format!("/tmp/{artifact_id}.zip")).display().to_string(),
+                    Utc::now().to_rfc3339()
+                ],
+            )?;
+        }
+
+        let tasks = find_parseable(&db, 3).await?;
+
+        assert_eq!(tasks.len(), 3);
+        Ok(())
+    }
 }

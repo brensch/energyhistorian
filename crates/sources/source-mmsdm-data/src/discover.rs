@@ -20,17 +20,17 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use futures_util::future::join_all;
-use ingest_core::{ArtifactKind, ArtifactMetadata, DiscoveredArtifact, DiscoveryCursorHint, RunContext};
+use ingest_core::{
+    ArtifactKind, ArtifactMetadata, DiscoveredArtifact, DiscoveryCursorHint, RunContext,
+};
 use regex::Regex;
-
-use crate::tables;
 
 /// Root URL for the MMSDM monthly archive on nemweb.
 const MMSDM_ARCHIVE_ROOT: &str = "https://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/";
 /// Base URL for constructing absolute hrefs from relative links.
 const NEMWEB_ROOT: &str = "https://nemweb.com.au";
 
-pub const SOURCE_ID: &str = "aemo.mmsdm";
+pub const SOURCE_ID: &str = "aemo.mmsdm.data";
 pub const COLLECTION_ID: &str = "public-reference-data";
 
 /// A discovered month slot with its precomputed DATA directory URL.
@@ -77,16 +77,7 @@ pub async fn discover_public_reference_data(
         .as_deref()
         .and_then(parse_release_month);
 
-    let pending: Vec<_> = month_slots
-        .into_iter()
-        .filter(|slot| {
-            if let Some((cursor_year, cursor_month)) = earliest_month {
-                (slot.year, slot.month) >= (cursor_year, cursor_month)
-            } else {
-                true
-            }
-        })
-        .collect();
+    let pending = select_pending_months(month_slots, earliest_month);
 
     tracing::info!(
         pending = pending.len(),
@@ -105,9 +96,15 @@ pub async fn discover_public_reference_data(
         if months_crawled >= batch_month_limit {
             break;
         }
-        let month_artifacts =
-            discover_month_artifacts(client, &slot.data_url, &slot.month_key, ctx, &href_re, &zip_re)
-                .await?;
+        let month_artifacts = discover_month_artifacts(
+            client,
+            &slot.data_url,
+            &slot.month_key,
+            ctx,
+            &href_re,
+            &zip_re,
+        )
+        .await?;
         artifacts.extend(month_artifacts);
         months_crawled += 1;
     }
@@ -121,6 +118,24 @@ pub async fn discover_public_reference_data(
     );
 
     Ok(artifacts)
+}
+
+fn select_pending_months(
+    month_slots: Vec<MonthSlot>,
+    earliest_month: Option<(i32, u32)>,
+) -> Vec<MonthSlot> {
+    let mut pending: Vec<_> = month_slots
+        .into_iter()
+        .filter(|slot| {
+            if let Some((cursor_year, cursor_month)) = earliest_month {
+                (slot.year, slot.month) >= (cursor_year, cursor_month)
+            } else {
+                true
+            }
+        })
+        .collect();
+    pending.sort_by_key(|slot| std::cmp::Reverse((slot.year, slot.month)));
+    pending
 }
 
 /// Fetch the root and all year pages to build a sorted list of month slots.
@@ -199,9 +214,9 @@ async fn build_month_schedule(client: &reqwest::Client) -> Result<Vec<MonthSlot>
 
 /// Fetch a single month's DATA/ directory and extract matching zip artifacts.
 ///
-/// Parses the directory listing HTML to find zip files matching our
-/// INCLUDE_TABLES list.  Each zip filename encodes the table name, file
-/// number, and a publication timestamp.
+/// Parses the directory listing HTML to find every DATA zip that matches the
+/// public archive filename pattern. Each zip filename encodes the table name,
+/// file number, and a publication timestamp.
 ///
 /// If the DATA/ directory doesn't exist (404 or other error), we log a
 /// warning and return an empty list rather than failing the entire discovery.
@@ -223,15 +238,26 @@ async fn discover_month_artifacts(
         }
     };
 
+    Ok(extract_month_artifacts(
+        &data_html, data_url, month_key, ctx, href_re, zip_re,
+    ))
+}
+
+fn extract_month_artifacts(
+    data_html: &str,
+    data_url: &str,
+    month_key: &str,
+    ctx: &RunContext,
+    href_re: &Regex,
+    zip_re: &Regex,
+) -> Vec<DiscoveredArtifact> {
     // Extract all hrefs from the directory listing.
     let mut hrefs = href_re
-        .captures_iter(&data_html)
+        .captures_iter(data_html)
         .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
         .collect::<Vec<_>>();
     hrefs.sort();
     hrefs.dedup();
-
-    let table_names = tables::include_table_names();
 
     let mut artifacts = Vec::new();
     for href in hrefs {
@@ -249,11 +275,6 @@ async fn discover_month_artifacts(
         let Some(table_name) = captures.get(1).map(|m| m.as_str()) else {
             continue;
         };
-
-        // Only include tables from our allow-list.
-        if !table_names.contains(&table_name) {
-            continue;
-        }
 
         let Some(file_no) = captures.get(2).map(|m| m.as_str()) else {
             continue;
@@ -290,7 +311,7 @@ async fn discover_month_artifacts(
             },
         });
     }
-    Ok(artifacts)
+    artifacts
 }
 
 /// Fetch a URL as text with error context.
@@ -311,4 +332,155 @@ pub(crate) async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<St
 fn parse_release_month(release_name: &str) -> Option<(i32, u32)> {
     let (year, month) = release_name.split_once('-')?;
     Some((year.parse().ok()?, month.parse().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_month_artifacts_keeps_all_matching_tables() {
+        let href_re = Regex::new(r#"HREF="([^"]+)""#).unwrap();
+        let zip_re =
+            Regex::new(r#"PUBLIC_ARCHIVE#([A-Z0-9_]+)#FILE(\d+)#([0-9]{6,12})\.zip"#).unwrap();
+        let ctx = RunContext {
+            run_id: "test-run".to_string(),
+            environment: "test".to_string(),
+            parser_version: "source-mmsdm-data/0.1".to_string(),
+        };
+        let html = r#"
+            <a HREF="PUBLIC_ARCHIVE%23DUDETAILSUMMARY%23FILE01%23202401010000.zip">one</a>
+            <a HREF="PUBLIC_ARCHIVE#SSM_ENABLEMENT_PERIOD#FILE02#202401010500.zip">two</a>
+            <a HREF="notes.txt">ignore</a>
+        "#;
+
+        let artifacts = extract_month_artifacts(
+            html,
+            "https://nemweb.example/DATA/",
+            "2024-01",
+            &ctx,
+            &href_re,
+            &zip_re,
+        );
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].metadata.source_id, SOURCE_ID);
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.metadata.artifact_id
+                    == "aemo_mmsdm_2024-01_DUDETAILSUMMARY_file01_202401010000")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.metadata.artifact_id
+                    == "aemo_mmsdm_2024-01_SSM_ENABLEMENT_PERIOD_file02_202401010500")
+        );
+    }
+
+    #[test]
+    fn parse_release_month_parses_year_month() {
+        assert_eq!(parse_release_month("2024-01"), Some((2024, 1)));
+        assert_eq!(parse_release_month("bad"), None);
+    }
+
+    #[test]
+    fn newest_months_are_prioritized_first() {
+        let pending = select_pending_months(
+            vec![
+                MonthSlot {
+                    year: 2025,
+                    month: 1,
+                    month_key: "2025-01".to_string(),
+                    data_url: "one".to_string(),
+                },
+                MonthSlot {
+                    year: 2026,
+                    month: 2,
+                    month_key: "2026-02".to_string(),
+                    data_url: "two".to_string(),
+                },
+                MonthSlot {
+                    year: 2025,
+                    month: 12,
+                    month_key: "2025-12".to_string(),
+                    data_url: "three".to_string(),
+                },
+            ],
+            None,
+        );
+
+        let ordered = pending
+            .into_iter()
+            .map(|slot| slot.month_key)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["2026-02", "2025-12", "2025-01"]);
+    }
+
+    #[test]
+    fn cursor_keeps_recent_and_later_months_eligible_for_follow_up_backfill() {
+        let pending = select_pending_months(
+            vec![
+                MonthSlot {
+                    year: 2024,
+                    month: 12,
+                    month_key: "2024-12".to_string(),
+                    data_url: "old".to_string(),
+                },
+                MonthSlot {
+                    year: 2025,
+                    month: 1,
+                    month_key: "2025-01".to_string(),
+                    data_url: "mid".to_string(),
+                },
+                MonthSlot {
+                    year: 2025,
+                    month: 12,
+                    month_key: "2025-12".to_string(),
+                    data_url: "new".to_string(),
+                },
+            ],
+            Some((2025, 1)),
+        );
+
+        let ordered = pending
+            .into_iter()
+            .map(|slot| slot.month_key)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["2025-12", "2025-01"]);
+    }
+
+    #[test]
+    fn no_cursor_means_older_months_remain_part_of_eventual_backfill_set() {
+        let pending = select_pending_months(
+            vec![
+                MonthSlot {
+                    year: 2024,
+                    month: 12,
+                    month_key: "2024-12".to_string(),
+                    data_url: "old".to_string(),
+                },
+                MonthSlot {
+                    year: 2025,
+                    month: 1,
+                    month_key: "2025-01".to_string(),
+                    data_url: "mid".to_string(),
+                },
+                MonthSlot {
+                    year: 2025,
+                    month: 12,
+                    month_key: "2025-12".to_string(),
+                    data_url: "new".to_string(),
+                },
+            ],
+            None,
+        );
+
+        let ordered = pending
+            .into_iter()
+            .map(|slot| slot.month_key)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["2025-12", "2025-01", "2024-12"]);
+    }
 }

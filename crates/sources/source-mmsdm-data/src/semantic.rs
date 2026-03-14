@@ -20,7 +20,7 @@
 //
 //    Think of SemanticModel as "documentation that the LLM can query".
 //
-// The raw MMSDM tables are ingested into `raw_aemo_mmsdm.*` by the
+// The raw MMSDM tables are ingested into `raw_aemo_mmsdm_data.*` by the
 // parser.  The ConsolidateObservedSchemaViews job auto-creates views
 // over those raw tables (stripping year tokens from names so e.g.
 // `participant_registration_dudetailsummary_202401` becomes accessible
@@ -46,7 +46,7 @@ pub fn semantic_models() -> Vec<SemanticModel> {
         // Almost every query about "which generators" or "what fuel type"
         // joins through this view.
         SemanticModel {
-            source_id: "aemo.mmsdm".into(),
+            source_id: "aemo.mmsdm.data".into(),
             object_name: "semantic.unit_dimension".into(),
             object_kind: "view".into(),
             description: "Current reconciled DUID dimension derived from MMSDM \
@@ -101,7 +101,7 @@ pub fn semantic_models() -> Vec<SemanticModel> {
         // for seeing how a DUID's attributes changed over time (e.g.
         // when a battery was registered, when storage capacity changed).
         SemanticModel {
-            source_id: "aemo.mmsdm".into(),
+            source_id: "aemo.mmsdm.data".into(),
             object_name: "semantic.participant_registration_dudetail".into(),
             object_kind: "view".into(),
             description: "Historised MMSDM DUID registration detail records. \
@@ -131,7 +131,7 @@ pub fn semantic_models() -> Vec<SemanticModel> {
         // source for unit_dimension — it has region, participant,
         // station, loss factors, ramp rates, etc.
         SemanticModel {
-            source_id: "aemo.mmsdm".into(),
+            source_id: "aemo.mmsdm.data".into(),
             object_name: "semantic.participant_registration_dudetailsummary".into(),
             object_kind: "view".into(),
             description: "Historised MMSDM DUID summary registration records \
@@ -166,7 +166,7 @@ pub fn semantic_models() -> Vec<SemanticModel> {
         },
         // ── participant_registration_station ─────────────────────────
         SemanticModel {
-            source_id: "aemo.mmsdm".into(),
+            source_id: "aemo.mmsdm.data".into(),
             object_name: "semantic.participant_registration_station".into(),
             object_kind: "view".into(),
             description: "Historised MMSDM station metadata including station \
@@ -193,7 +193,7 @@ pub fn semantic_models() -> Vec<SemanticModel> {
         },
         // ── participant_registration_stationowner ────────────────────
         SemanticModel {
-            source_id: "aemo.mmsdm".into(),
+            source_id: "aemo.mmsdm.data".into(),
             object_name: "semantic.participant_registration_stationowner".into(),
             object_kind: "view".into(),
             description: "Historised MMSDM station ownership records. \
@@ -216,7 +216,7 @@ pub fn semantic_models() -> Vec<SemanticModel> {
         },
         // ── participant_registration_genunits ────────────────────────
         SemanticModel {
-            source_id: "aemo.mmsdm".into(),
+            source_id: "aemo.mmsdm.data".into(),
             object_name: "semantic.participant_registration_genunits".into(),
             object_kind: "view".into(),
             description: "Historised MMSDM generating unit records with \
@@ -260,7 +260,7 @@ pub fn semantic_jobs() -> Vec<SemanticJob> {
         // ── Auto-consolidate raw tables ──────────────────────────────
         //
         // The parser creates per-schema-hash tables like:
-        //   raw_aemo_mmsdm.participant_registration_dudetailsummary_abc123
+        //   raw_aemo_mmsdm_data.participant_registration_dudetailsummary_abc123
         //
         // This job auto-creates UNION ALL views over all schema versions
         // so consumers don't need to know about schema evolution:
@@ -282,12 +282,12 @@ pub fn semantic_jobs() -> Vec<SemanticJob> {
         SemanticJob::SqlView {
             target_database: "semantic".to_string(),
             view_name: "mmsdm_table_locator".to_string(),
-            required_objects: vec!["raw_aemo_mmsdm.observed_schemas".to_string()],
+            required_objects: vec!["raw_aemo_mmsdm_data.observed_schemas".to_string()],
             sql: "\
                 SELECT logical_section, logical_table, report_version, \
-                       physical_table, 'raw_aemo_mmsdm' AS database_name, \
+                       physical_table, 'raw_aemo_mmsdm_data' AS database_name, \
                        column_count, schema_hash, first_seen_at, last_seen_at \
-                FROM raw_aemo_mmsdm.observed_schemas \
+                FROM raw_aemo_mmsdm_data.observed_schemas \
                 WHERE physical_table != '' \
                 GROUP BY logical_section, logical_table, report_version, \
                          physical_table, column_count, schema_hash, \
@@ -301,13 +301,13 @@ pub fn semantic_jobs() -> Vec<SemanticJob> {
         SemanticJob::SqlView {
             target_database: "semantic".to_string(),
             view_name: "mmsdm_schema_registry".to_string(),
-            required_objects: vec!["raw_aemo_mmsdm.observed_schemas".to_string()],
+            required_objects: vec!["raw_aemo_mmsdm_data.observed_schemas".to_string()],
             sql: "\
                 SELECT DISTINCT logical_section, logical_table, report_version, \
                        physical_table, column_count, schema_hash, \
                        min(first_seen_at) AS first_seen, \
                        max(last_seen_at) AS last_seen \
-                FROM raw_aemo_mmsdm.observed_schemas \
+                FROM raw_aemo_mmsdm_data.observed_schemas \
                 GROUP BY logical_section, logical_table, report_version, \
                          physical_table, column_count, schema_hash"
                 .to_string(),
@@ -424,7 +424,6 @@ pub fn semantic_jobs() -> Vec<SemanticJob> {
 ///    - EFFECTIVE_PARTICIPANTID: owner if known, otherwise registered participant
 const UNIT_DIMENSION_SQL: &str = concat!(
     "WITH toDateTime64('1900-01-01 00:00:00', 3) AS epoch, ",
-
     // -- current_summary: latest DUDETAILSUMMARY row per DUID --
     "current_summary AS (",
     "SELECT DUID, ",
@@ -446,7 +445,6 @@ const UNIT_DIMENSION_SQL: &str = concat!(
     "SELECT DUID, ",
     "argMax(tuple(REGIONID, PARTICIPANTID, STATIONID, DISPATCHTYPE, SCHEDULE_TYPE, CONNECTIONPOINTID, TRANSMISSIONLOSSFACTOR, DISTRIBUTIONLOSSFACTOR, MAX_RAMP_RATE_UP, MAX_RAMP_RATE_DOWN, MINIMUM_ENERGY_PRICE, MAXIMUM_ENERGY_PRICE, START_DATE, END_DATE), tuple(coalesce(START_DATE, epoch), processed_at)) AS summary_row ",
     "FROM semantic.participant_registration_dudetailsummary GROUP BY DUID)), ",
-
     // -- current_detail: latest DUDETAIL row per DUID --
     "current_detail AS (",
     "SELECT DUID, ",
@@ -456,14 +454,12 @@ const UNIT_DIMENSION_SQL: &str = concat!(
     "SELECT DUID, ",
     "argMax(tuple(MAXSTORAGECAPACITY, DISPATCHTYPE), tuple(coalesce(EFFECTIVEDATE, epoch), processed_at)) AS detail_row ",
     "FROM semantic.participant_registration_dudetail GROUP BY DUID)), ",
-
     // -- current_alloc: latest DUID→GENSET mapping --
     "current_alloc AS (",
     "SELECT DUID, tupleElement(alloc_row, 1) AS GENSETID ",
     "FROM (",
     "SELECT DUID, argMax(tuple(GENSETID), tuple(coalesce(EFFECTIVEDATE, epoch), processed_at)) AS alloc_row ",
     "FROM semantic.participant_registration_dualloc GROUP BY DUID)), ",
-
     // -- current_station: latest station metadata --
     "current_station AS (",
     "SELECT STATIONID, ",
@@ -473,7 +469,6 @@ const UNIT_DIMENSION_SQL: &str = concat!(
     "SELECT STATIONID, ",
     "argMax(tuple(STATIONNAME, STATE), tuple(coalesce(LASTCHANGED, epoch), processed_at)) AS station_row ",
     "FROM semantic.participant_registration_station GROUP BY STATIONID)), ",
-
     // -- current_owner: latest station ownership --
     "current_owner AS (",
     "SELECT STATIONID, tupleElement(owner_row, 1) AS STATION_OWNER_PARTICIPANTID ",
@@ -481,7 +476,6 @@ const UNIT_DIMENSION_SQL: &str = concat!(
     "SELECT STATIONID, ",
     "argMax(tuple(PARTICIPANTID), tuple(coalesce(EFFECTIVEDATE, epoch), processed_at)) AS owner_row ",
     "FROM semantic.participant_registration_stationowner GROUP BY STATIONID)), ",
-
     // -- current_gen: latest generating unit attributes --
     "current_gen AS (",
     "SELECT GENSETID, ",
@@ -494,7 +488,6 @@ const UNIT_DIMENSION_SQL: &str = concat!(
     "SELECT GENSETID, ",
     "argMax(tuple(GENSETTYPE, CO2E_ENERGY_SOURCE, REGISTEREDCAPACITY, MAXCAPACITY, CO2E_EMISSIONS_FACTOR), tuple(coalesce(LASTCHANGED, epoch), processed_at)) AS gen_row ",
     "FROM semantic.participant_registration_genunits GROUP BY GENSETID)) ",
-
     // -- Final join: assemble the dimension --
     "SELECT summary.DUID AS DUID, summary.REGIONID, summary.PARTICIPANTID, ",
     "coalesce(owner.STATION_OWNER_PARTICIPANTID, summary.PARTICIPANTID) AS EFFECTIVE_PARTICIPANTID, ",

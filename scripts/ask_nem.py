@@ -78,7 +78,7 @@ def log(message: str) -> None:
 
 FALLBACK_REGISTRY = [
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.dispatch_price",
         "object_kind": "view",
         "description": "Regional 5-minute energy and FCAS price outcomes by settlement interval.",
@@ -91,7 +91,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["price", "volatility", "fcas", "region", "spread"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.daily_region_dispatch",
         "object_kind": "view",
         "description": "Regional dispatch outcomes, demand, interchange, available generation, and regional FCAS enablement by settlement interval.",
@@ -104,7 +104,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["demand", "dispatch", "region", "imports", "fcas", "price"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.daily_unit_dispatch",
         "object_kind": "view",
         "description": "Unit-level dispatch targets, availability, ramp rates, and FCAS enablement by settlement interval.",
@@ -117,7 +117,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["duid", "dispatch", "ramp", "battery", "fcas"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.dispatch_unit_solution",
         "object_kind": "view",
         "description": "Richer unit dispatch solution surface including UIGF, storage, and semi-scheduled fields by settlement interval.",
@@ -130,7 +130,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["curtailment", "semi-scheduled", "storage"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.actual_gen_duid",
         "object_kind": "view",
         "description": "Metered actual generation or energy readings by interval and DUID.",
@@ -143,7 +143,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["generation", "actual", "fuel", "mix"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.dispatch_interconnectorres",
         "object_kind": "view",
         "description": "Interconnector dispatch results including flow, limits, losses, and marginal value.",
@@ -156,7 +156,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["interconnector", "flow", "limit", "loss", "spread"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.dispatch_constraint",
         "object_kind": "view",
         "description": "Constraint outcomes by settlement interval and constraint identifier.",
@@ -169,7 +169,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["constraint", "binding", "shadow price"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.bid_dayoffer",
         "object_kind": "view",
         "description": "Daily bid price bands and rebid explanations by DUID, participant, and bid type.",
@@ -182,7 +182,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["bids", "rebid", "offers"],
     },
     {
-        "source_id": "aemo.nemweb",
+        "source_id": "aemo.nemweb.data",
         "object_name": "semantic.bid_peroffer",
         "object_kind": "view",
         "description": "Interval bid availabilities by DUID and bid type.",
@@ -195,7 +195,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["bids", "availability", "offers"],
     },
     {
-        "source_id": "aemo.mmsdm",
+        "source_id": "aemo.mmsdm.data",
         "object_name": "semantic.unit_dimension",
         "object_kind": "view",
         "description": "Current reconciled DUID dimension derived from MMSDM registration history.",
@@ -208,7 +208,7 @@ FALLBACK_REGISTRY = [
         "question_tags": ["duid", "participant", "station", "fuel", "capacity", "battery"],
     },
     {
-        "source_id": "aemo.mmsdm",
+        "source_id": "aemo.mmsdm.data",
         "object_name": "semantic.participant_registration_dudetailsummary",
         "object_kind": "view",
         "description": "Historised MMSDM DUID summary registration records.",

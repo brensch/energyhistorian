@@ -1,4 +1,4 @@
-// ── source-mmsdm ─────────────────────────────────────────────────────────
+// ── source-mmsdm-data ────────────────────────────────────────────────────
 //
 // Ingestion plugin for AEMO's MMSDM (Market Management System Data Model)
 // monthly archive.  MMSDM publishes ~200 tables per month as individual zip
@@ -10,18 +10,16 @@
 //   {root}/{year}/MMSDM_{year}_{month}/MMSDM_Historical_Data_SQLLoader/DATA/
 //     PUBLIC_ARCHIVE#TABLE_NAME#FILE01#YYYYMM010000.zip
 //
-// We don't capture all ~200 tables — only the ones useful for energy market
-// analysis.  See tables.rs for the full list and rationale.
+// We ingest every table zip published under DATA/ and let the generic
+// parser/schema layer historise each table as it appears.
 //
 // Module layout:
 //   lib.rs      — Plugin trait implementations and fetch/parse wiring
-//   tables.rs   — Which tables we capture, with descriptions
 //   discover.rs — Two-phase skeleton+batch discovery logic
 //   semantic.rs — ClickHouse semantic views and model registry metadata
 
 mod discover;
 mod semantic;
-pub mod tables;
 
 use std::fs;
 use std::path::Path;
@@ -40,9 +38,9 @@ use sha2::{Digest, Sha256};
 use discover::{COLLECTION_ID, SOURCE_ID};
 
 #[derive(Clone)]
-pub struct MmsdmPlugin;
+pub struct MmsdmDataPlugin;
 
-impl MmsdmPlugin {
+impl MmsdmDataPlugin {
     pub fn new() -> Self {
         Self
     }
@@ -94,10 +92,10 @@ impl MmsdmPlugin {
 
     /// Parse a downloaded MMSDM zip into observed schemas.
     ///
-    /// Delegates to source-nemweb's generic CID CSV parser — MMSDM and
+    /// Delegates to source-nemweb-data's generic CID CSV parser — MMSDM and
     /// NEMweb zips use the same CSV format.
     pub fn parse_artifact(&self, artifact: &LocalArtifact) -> Result<ParseResult> {
-        source_nemweb::parse::parse_local_archive(artifact, Path::new("."))
+        source_nemweb_data::parse::parse_local_archive(artifact, Path::new("."))
     }
 
     /// Stream parsed rows from a downloaded MMSDM zip into a row sink.
@@ -106,12 +104,12 @@ impl MmsdmPlugin {
         artifact: &LocalArtifact,
         sink: &mut dyn RawTableRowSink,
     ) -> Result<()> {
-        let plan = source_nemweb::parse::inspect_local_archive(artifact)?;
-        source_nemweb::parse::stream_local_archive_rows(artifact, &plan, sink)
+        let plan = source_nemweb_data::parse::inspect_local_archive(artifact)?;
+        source_nemweb_data::parse::stream_local_archive_rows(artifact, &plan, sink)
     }
 }
 
-impl Default for MmsdmPlugin {
+impl Default for MmsdmDataPlugin {
     fn default() -> Self {
         Self::new()
     }
@@ -123,7 +121,7 @@ impl Default for MmsdmPlugin {
 // collections) and synchronous parse methods.  The async discovery and
 // fetch are on RuntimeSourcePlugin below.
 
-impl SourcePlugin for MmsdmPlugin {
+impl SourcePlugin for MmsdmDataPlugin {
     fn descriptor(&self) -> SourceDescriptor {
         SourceDescriptor {
             source_id: SOURCE_ID.to_string(),
@@ -141,10 +139,8 @@ impl SourcePlugin for MmsdmPlugin {
             supports_historical_media: true,
             notes: vec![
                 "Discovers per-table zips from the public MMSDM monthly DATA directories.".into(),
-                format!(
-                    "Captures {} tables across registration, dispatch, bidding, and more.",
-                    tables::include_tables().len()
-                ),
+                "Historises every discovered DATA zip dynamically as new tables and schema versions appear."
+                    .into(),
             ],
         }
     }
@@ -245,9 +241,9 @@ impl SourcePlugin for MmsdmPlugin {
 // The runtime trait adds async discovery and fetch methods that use
 // reqwest::Client for HTTP.  These are called by the orchestrator.
 
-impl RuntimeSourcePlugin for MmsdmPlugin {
+impl RuntimeSourcePlugin for MmsdmDataPlugin {
     fn parser_version(&self) -> &'static str {
-        "source-mmsdm/0.1"
+        "source-mmsdm-data/0.1"
     }
 
     fn discover_collection_async<'a>(
@@ -302,7 +298,7 @@ impl RuntimeSourcePlugin for MmsdmPlugin {
         _ctx: &RunContext,
         sink: &mut dyn StructuredRawEventSink,
     ) -> Result<()> {
-        source_nemweb::parse::stream_local_archive_events(artifact, sink)
+        source_nemweb_data::parse::stream_local_archive_events(artifact, sink)
     }
 }
 

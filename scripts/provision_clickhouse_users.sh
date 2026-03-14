@@ -13,7 +13,7 @@ set -eu
 
 : "${SEMANTIC_DB:=semantic}"
 : "${TRACKING_DB:=tracking}"
-: "${RAW_DATABASES:=raw_aemo_nemweb,raw_aemo_mmsdm,raw_aemo_metadata_dvd,raw_aemo_metadata_html}"
+: "${RAW_DATABASES:=raw_aemo_nemweb_data,raw_aemo_mmsdm_data,raw_aemo_mmsdm_meta,raw_aemo_docs}"
 
 sql_quote() {
   printf "%s" "$1" | sed "s/'/''/g"

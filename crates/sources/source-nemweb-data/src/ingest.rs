@@ -55,7 +55,7 @@ pub async fn ingest_recent(
     let ctx = RunContext {
         run_id: format!("{}-{}", family.id, Utc::now().timestamp_millis()),
         environment: "local".to_string(),
-        parser_version: "source-nemweb/0.1".to_string(),
+        parser_version: "source-nemweb-data/0.1".to_string(),
     };
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)

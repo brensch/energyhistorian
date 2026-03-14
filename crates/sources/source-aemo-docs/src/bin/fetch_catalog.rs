@@ -1,8 +1,8 @@
 //! Fetches and parses the AEMO MMS Data Model into a JSON catalog.
-//! Usage: cargo run -p source-aemo-metadata --bin fetch_catalog [output_path]
+//! Usage: cargo run -p source-aemo-docs --bin fetch_catalog [output_path]
 
 use anyhow::Result;
-use source_aemo_metadata::AemoMetadataHtmlPlugin;
+use source_aemo_docs::AemoDocsPlugin;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
         .nth(1)
         .unwrap_or_else(|| "data/catalog.json".to_string());
 
-    let plugin = AemoMetadataHtmlPlugin::new();
+    let plugin = AemoDocsPlugin::new();
     let client = reqwest::Client::builder()
         .user_agent("energyhistorian/0.1")
         .build()?;
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     }
 
     // Write to file
-    let json = AemoMetadataHtmlPlugin::catalog_to_json(&catalog)?;
+    let json = AemoDocsPlugin::catalog_to_json(&catalog)?;
 
     if let Some(parent) = std::path::Path::new(&output_path).parent() {
         std::fs::create_dir_all(parent)?;

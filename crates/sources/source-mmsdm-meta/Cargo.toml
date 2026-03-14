@@ -1,16 +1,16 @@
 [package]
-name = "source-nemweb"
+name = "source-mmsdm-meta"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-csv = "1.4"
 ingest-core = { path = "../../ingest-core" }
+encoding_rs = "0.8"
+regex = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
-scraper = "0.24"
-serde = { version = "1.0", features = ["derive"] }
+roxmltree = "0.20"
 serde_json = "1.0"
 sha2 = "0.10"
-zip = { version = "4.3", default-features = false, features = ["deflate"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }

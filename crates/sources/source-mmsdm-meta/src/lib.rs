@@ -21,9 +21,9 @@ use zip::ZipArchive;
 const MMSDM_ARCHIVE_ROOT: &str = "https://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/";
 
 #[derive(Clone)]
-pub struct AemoMetadataDvdPlugin;
+pub struct MmsdmMetaPlugin;
 
-impl AemoMetadataDvdPlugin {
+impl MmsdmMetaPlugin {
     pub fn new() -> Self {
         Self
     }
@@ -84,16 +84,16 @@ impl AemoMetadataDvdPlugin {
     }
 }
 
-impl Default for AemoMetadataDvdPlugin {
+impl Default for MmsdmMetaPlugin {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SourcePlugin for AemoMetadataDvdPlugin {
+impl SourcePlugin for MmsdmMetaPlugin {
     fn descriptor(&self) -> SourceDescriptor {
         SourceDescriptor {
-            source_id: "aemo_metadata_dvd".to_string(),
+            source_id: "aemo.mmsdm.meta".to_string(),
             domain: "metadata".to_string(),
             description: "AEMO monthly SQLLoader/DVD metadata archives.".to_string(),
             versioned_metadata: true,
@@ -196,22 +196,22 @@ impl SourcePlugin for AemoMetadataDvdPlugin {
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "mms_tables".to_string(),
-                required_objects: vec!["raw_aemo_metadata_dvd.tables".to_string()],
-                sql: "SELECT table_name, description, model_version, release_name, row_json FROM raw_aemo_metadata_dvd.tables WHERE table_name IS NOT NULL".to_string(),
+                required_objects: vec!["raw_aemo_mmsdm_meta.tables".to_string()],
+                sql: "SELECT table_name, description, model_version, release_name, row_json FROM raw_aemo_mmsdm_meta.tables WHERE table_name IS NOT NULL".to_string(),
             },
             SemanticJob::SqlView {
                 target_database: "semantic".to_string(),
                 view_name: "mms_columns".to_string(),
-                required_objects: vec!["raw_aemo_metadata_dvd.columns".to_string()],
-                sql: "SELECT * FROM raw_aemo_metadata_dvd.columns".to_string(),
+                required_objects: vec!["raw_aemo_mmsdm_meta.columns".to_string()],
+                sql: "SELECT * FROM raw_aemo_mmsdm_meta.columns".to_string(),
             },
         ]
     }
 }
 
-impl RuntimeSourcePlugin for AemoMetadataDvdPlugin {
+impl RuntimeSourcePlugin for MmsdmMetaPlugin {
     fn parser_version(&self) -> &'static str {
-        "source-aemo-dvd/0.1"
+        "source-mmsdm-meta/0.1"
     }
 
     fn discover_collection_async<'a>(
@@ -336,10 +336,10 @@ async fn discover_monthly_metadata(
                     artifacts.push(DiscoveredArtifact {
                         metadata: ArtifactMetadata {
                             artifact_id: format!(
-                                "aemo_metadata_dvd:monthly-metadata:{month_key}:v{}:{artifact_type}",
+                                "aemo.mmsdm.meta:monthly-metadata:{month_key}:v{}:{artifact_type}",
                                 sanitize_part(&version)
                             ),
-                            source_id: "aemo_metadata_dvd".to_string(),
+                            source_id: "aemo.mmsdm.meta".to_string(),
                             acquisition_uri: url,
                             discovered_at: Utc::now(),
                             fetched_at: None,

@@ -12,10 +12,10 @@ use ingest_core::{
     StructuredRawEventSink,
 };
 use serde::Serialize;
-use source_aemo_dvd::AemoMetadataDvdPlugin;
-use source_aemo_metadata::AemoMetadataHtmlPlugin;
-use source_mmsdm::MmsdmPlugin;
-use source_nemweb::NemwebPlugin;
+use source_aemo_docs::AemoDocsPlugin;
+use source_mmsdm_data::MmsdmDataPlugin;
+use source_mmsdm_meta::MmsdmMetaPlugin;
+use source_nemweb_data::NemwebDataPlugin;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SourcePlan {
@@ -60,10 +60,10 @@ impl SourceRegistry {
             sources: Vec::new(),
             source_indexes: HashMap::new(),
         };
-        registry.register(NemwebPlugin::new());
-        registry.register(MmsdmPlugin::new());
-        registry.register(AemoMetadataHtmlPlugin::new());
-        registry.register(AemoMetadataDvdPlugin::new());
+        registry.register(NemwebDataPlugin::new());
+        registry.register(MmsdmDataPlugin::new());
+        registry.register(AemoDocsPlugin::new());
+        registry.register(MmsdmMetaPlugin::new());
         registry
     }
 
@@ -87,6 +87,29 @@ impl SourceRegistry {
                 })
             })
             .collect()
+    }
+
+    pub fn source_plan(&self, source_id: &str) -> Result<SourcePlan> {
+        Ok(self.source(source_id)?.plan.clone())
+    }
+
+    pub fn filter_to(mut self, source_id: &str, collection_id: Option<&str>) -> Result<Self> {
+        let mut selected = self.source(source_id)?.clone();
+        if let Some(collection_id) = collection_id {
+            selected
+                .plan
+                .collections
+                .retain(|collection| collection.id == collection_id);
+            if selected.plan.collections.is_empty() {
+                return Err(anyhow!(
+                    "source '{source_id}' has no collection '{collection_id}'"
+                ));
+            }
+        }
+        self.sources = vec![selected];
+        self.source_indexes.clear();
+        self.source_indexes.insert(source_id.to_string(), 0);
+        Ok(self)
     }
 
     pub async fn discover(
@@ -199,6 +222,19 @@ impl SourceRegistry {
             parser_version: source.parser_version.clone(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_plugin_for_test<P>(plugin: P) -> Self
+    where
+        P: RuntimeSourcePlugin + 'static,
+    {
+        let mut registry = Self {
+            sources: Vec::new(),
+            source_indexes: HashMap::new(),
+        };
+        registry.register(plugin);
+        registry
+    }
 }
 
 pub(crate) fn stable_stagger_offset(
@@ -213,4 +249,24 @@ pub(crate) fn stable_stagger_offset(
     source_id.hash(&mut hasher);
     collection_id.hash(&mut hasher);
     hasher.finish() % poll_interval_seconds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SourceRegistry;
+
+    #[test]
+    fn registers_all_renamed_source_plugins() {
+        let registry = SourceRegistry::new();
+        for source_id in [
+            "aemo.nemweb.data",
+            "aemo.mmsdm.data",
+            "aemo.docs",
+            "aemo.mmsdm.meta",
+        ] {
+            registry
+                .source_plan(source_id)
+                .unwrap_or_else(|err| panic!("missing source '{source_id}': {err}"));
+        }
+    }
 }

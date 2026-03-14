@@ -52,9 +52,9 @@ impl Config {
         let clickhouse_read_url = match env_var("CLICKHOUSE_READ_URL") {
             Some(url) => url,
             None => build_clickhouse_dsn(
-                clickhouse_url.as_deref().context(
-                    "CLICKHOUSE_URL is required when CLICKHOUSE_READ_URL is not set",
-                )?,
+                clickhouse_url
+                    .as_deref()
+                    .context("CLICKHOUSE_URL is required when CLICKHOUSE_READ_URL is not set")?,
                 &required("CLICKHOUSE_AI_API_READ_USER")?,
                 &required("CLICKHOUSE_AI_API_READ_PASSWORD")?,
             )?,
@@ -62,9 +62,9 @@ impl Config {
         let clickhouse_write_url = match env_var("CLICKHOUSE_WRITE_URL") {
             Some(url) => url,
             None => build_clickhouse_dsn(
-                clickhouse_url.as_deref().context(
-                    "CLICKHOUSE_URL is required when CLICKHOUSE_WRITE_URL is not set",
-                )?,
+                clickhouse_url
+                    .as_deref()
+                    .context("CLICKHOUSE_URL is required when CLICKHOUSE_WRITE_URL is not set")?,
                 &required("CLICKHOUSE_HISTORIAN_USER")?,
                 &required("CLICKHOUSE_HISTORIAN_PASSWORD")?,
             )?,

@@ -64,10 +64,10 @@ pub async fn discover_current_data_model(
         DiscoveredArtifact {
             metadata: ArtifactMetadata {
                 artifact_id: format!(
-                    "aemo_metadata_html:current-data-model:model-html:v{}",
+                    "aemo.docs:current-data-model:model-html:v{}",
                     sanitize_part(&current_release.model_version)
                 ),
-                source_id: "aemo_metadata_html".to_string(),
+                source_id: "aemo.docs".to_string(),
                 acquisition_uri: mms_parser::TOC_URL.to_string(),
                 discovered_at: Utc::now(),
                 fetched_at: None,
@@ -93,10 +93,10 @@ pub fn daily_snapshot_artifact(
     DiscoveredArtifact {
         metadata: ArtifactMetadata {
             artifact_id: format!(
-                "aemo_metadata_html:{collection_id}:snapshot:{snapshot_date}:{}",
+                "aemo.docs:{collection_id}:snapshot:{snapshot_date}:{}",
                 sanitize_part(url.rsplit('/').next().unwrap_or(collection_id))
             ),
-            source_id: "aemo_metadata_html".to_string(),
+            source_id: "aemo.docs".to_string(),
             acquisition_uri: url.to_string(),
             discovered_at: Utc::now(),
             fetched_at: None,

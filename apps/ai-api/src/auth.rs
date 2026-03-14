@@ -95,16 +95,14 @@ impl WorkosAuth {
         let normalized_email = email.to_lowercase();
         let first_name = claims.first_name;
         let last_name = claims.last_name;
-        let name = claims.name.unwrap_or_else(|| {
-            match (&first_name, &last_name) {
-                (Some(first), Some(last)) => {
-                    format!("{first} {last}").trim().to_string()
-                }
+        let name = claims
+            .name
+            .unwrap_or_else(|| match (&first_name, &last_name) {
+                (Some(first), Some(last)) => format!("{first} {last}").trim().to_string(),
                 (Some(first), None) => first.clone(),
                 (None, Some(last)) => last.clone(),
                 (None, None) => normalized_email.clone(),
-            }
-        });
+            });
         let org_id = claims
             .org_id
             .unwrap_or_else(|| format!("personal_{}", claims.sub));
@@ -226,14 +224,10 @@ where
                 warn!("request missing bearer token");
                 AppError::Unauthorized
             })?;
-        let user = app_state
-            .auth
-            .verify_bearer(token)
-            .await
-            .map_err(|error| {
-                warn!(error = %error, "bearer token verification failed");
-                AppError::Unauthorized
-            })?;
+        let user = app_state.auth.verify_bearer(token).await.map_err(|error| {
+            warn!(error = %error, "bearer token verification failed");
+            AppError::Unauthorized
+        })?;
         Ok(Self(user))
     }
 }
