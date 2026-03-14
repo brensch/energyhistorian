@@ -143,22 +143,16 @@ async fn sync_schedules(db: &Db, seeds: &[ScheduleSeed]) -> Result<()> {
     let conn = db.lock().await;
     let now = Utc::now();
     for seed in seeds {
-        let next_discovery_at = next_staggered_discovery_at(
-            now,
-            seed.poll_interval_seconds,
-            seed.stagger_offset_seconds,
-        );
         conn.execute(
             "INSERT INTO schedules (source_id, collection_id, enabled, poll_interval_seconds, next_discovery_at)
              VALUES (?1, ?2, 1, ?3, ?4)
              ON CONFLICT (source_id, collection_id) DO UPDATE
-             SET poll_interval_seconds = excluded.poll_interval_seconds,
-                 next_discovery_at = MIN(schedules.next_discovery_at, excluded.next_discovery_at)",
+             SET poll_interval_seconds = excluded.poll_interval_seconds",
             rusqlite::params![
                 seed.source_id,
                 seed.collection_id,
                 seed.poll_interval_seconds,
-                next_discovery_at.to_rfc3339(),
+                now.to_rfc3339(),
             ],
         )?;
     }
@@ -1388,6 +1382,27 @@ mod tests {
             chrono::DateTime::parse_from_rfc3339(&next_discovery_at)?.with_timezone(&Utc);
         assert!(next_discovery_at >= before + chrono::Duration::seconds(9));
         assert!(next_discovery_at <= before + chrono::Duration::seconds(15));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seed_registry_schedules_makes_new_schedules_due_immediately() -> Result<()> {
+        let (_dir, db) = temp_db()?;
+        let source_id = "test.source";
+        let collection_id = "test-collection";
+        let registry = SourceRegistry::from_plugin_for_test(FakeDiscoverPlugin {
+            source_id,
+            collection_id,
+            artifacts: vec![artifact("artifact-one", source_id)],
+        });
+
+        seed_registry_schedules(&db, &registry).await?;
+
+        let due = find_due_schedules(&db).await?;
+        assert_eq!(
+            due,
+            vec![(source_id.to_string(), collection_id.to_string())]
+        );
         Ok(())
     }
 

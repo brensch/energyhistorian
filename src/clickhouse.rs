@@ -169,21 +169,41 @@ impl ClickHousePublisher {
 
     async fn ensure_database_initialized(&self, database: &str) -> Result<()> {
         {
-            let mut initialized = self.initialized_databases.lock().await;
-            if !initialized.insert(database.to_string()) {
+            let initialized = self.initialized_databases.lock().await;
+            if initialized.contains(database) {
                 return Ok(());
             }
         }
-        if let Err(error) = async {
+        async {
             self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
                 .await?;
             self.ensure_observed_schema_tables(database).await
         }
-        .await
+        .await?;
+        let mut initialized = self.initialized_databases.lock().await;
+        initialized.insert(database.to_string());
+        Ok(())
+    }
+
+    async fn ensure_database_ready(&self, database: &str) -> Result<()> {
+        self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_observed_schema_tables_ready(&self, database: &str) -> Result<()> {
+        self.ensure_database_ready(database).await?;
+        self.ensure_observed_schema_tables(database).await?;
+        Ok(())
+    }
+
+    async fn ensure_raw_table_exists(&self, _database: &str, create_sql: &str) -> Result<()> {
+        for statement in create_sql
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
         {
-            let mut initialized = self.initialized_databases.lock().await;
-            initialized.remove(database);
-            return Err(error);
+            self.execute_sql(statement).await?;
         }
         Ok(())
     }
@@ -196,27 +216,14 @@ impl ClickHousePublisher {
     ) -> Result<()> {
         let cache_key = (database.to_string(), table_name.to_string());
         {
-            let mut known_tables = self.known_raw_tables.lock().await;
-            if !known_tables.insert(cache_key.clone()) {
+            let known_tables = self.known_raw_tables.lock().await;
+            if known_tables.contains(&cache_key) {
                 return Ok(());
             }
         }
-        if let Err(error) = async {
-            for statement in create_sql
-                .split(';')
-                .map(str::trim)
-                .filter(|statement| !statement.is_empty())
-            {
-                self.execute_sql(statement).await?;
-            }
-            Ok(())
-        }
-        .await
-        {
-            let mut known_tables = self.known_raw_tables.lock().await;
-            known_tables.remove(&cache_key);
-            return Err(error);
-        }
+        self.ensure_raw_table_exists(database, create_sql).await?;
+        let mut known_tables = self.known_raw_tables.lock().await;
+        known_tables.insert(cache_key);
         Ok(())
     }
 
@@ -227,6 +234,7 @@ impl ClickHousePublisher {
                 return Ok(());
             }
         }
+        self.ensure_observed_schema_tables_ready(database).await?;
         let rows = self
             .query_json_rows::<RegisteredSchemaRow>(&format!(
                 "SELECT DISTINCT physical_table, schema_hash FROM {database}.observed_schemas"
@@ -276,7 +284,8 @@ impl ClickHousePublisher {
         chunk: RawChunkContext<'_>,
         rows: &[StructuredRow],
     ) -> Result<usize> {
-        let plan = plan_raw_table_in_database(&raw_database_name(chunk.source_id), chunk.schema);
+        let database = raw_database_name(chunk.source_id);
+        let plan = plan_raw_table_in_database(&database, chunk.schema);
         let column_types = chunk
             .schema
             .columns
@@ -321,8 +330,7 @@ impl ClickHousePublisher {
         rows: &[Value],
     ) -> Result<()> {
         let database = raw_database_name(source_id);
-        self.execute_sql(&format!("CREATE DATABASE IF NOT EXISTS {database}"))
-            .await?;
+        self.ensure_database_ready(&database).await?;
         let full_name = raw_plugin_table_name(source_id, table_name);
         self.execute_sql(&format!(
             r#"
