@@ -24,6 +24,7 @@ use ingest_core::{
     ArtifactKind, ArtifactMetadata, DiscoveredArtifact, DiscoveryCursorHint, RunContext,
 };
 use regex::Regex;
+use tokio::time::{Duration, sleep};
 
 /// Root URL for the MMSDM monthly archive on nemweb.
 const MMSDM_ARCHIVE_ROOT: &str = "https://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/";
@@ -32,6 +33,9 @@ const NEMWEB_ROOT: &str = "https://nemweb.com.au";
 
 pub const SOURCE_ID: &str = "aemo.mmsdm.data";
 pub const COLLECTION_ID: &str = "public-reference-data";
+
+const FETCH_RETRY_ATTEMPTS: u32 = 4;
+const FETCH_RETRY_BASE_DELAY_MS: u64 = 250;
 
 /// A discovered month slot with its precomputed DATA directory URL.
 ///
@@ -316,16 +320,65 @@ fn extract_month_artifacts(
 
 /// Fetch a URL as text with error context.
 pub(crate) async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
-    client
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match fetch_text_once(client, url).await {
+            Ok(body) => return Ok(body),
+            Err(err) if attempt < FETCH_RETRY_ATTEMPTS => {
+                let delay_ms = FETCH_RETRY_BASE_DELAY_MS * (1_u64 << (attempt - 1));
+                tracing::warn!(
+                    url,
+                    attempt,
+                    max_attempts = FETCH_RETRY_ATTEMPTS,
+                    delay_ms,
+                    error = %err,
+                    "mmsdm: fetch failed, retrying"
+                );
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn fetch_text_once(client: &reqwest::Client, url: &str) -> Result<String> {
+    let response = client
         .get(url)
         .send()
         .await
-        .with_context(|| format!("fetching {url}"))?
-        .error_for_status()
-        .with_context(|| format!("unexpected status fetching {url}"))?
+        .with_context(|| format!("sending request to {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let preview = body_preview(&body);
+        anyhow::bail!(
+            "unexpected status fetching {url}: {}{}",
+            status,
+            if preview.is_empty() {
+                String::new()
+            } else {
+                format!(" body={preview}")
+            }
+        );
+    }
+    response
         .text()
         .await
         .with_context(|| format!("reading body for {url}"))
+}
+
+fn body_preview(body: &str) -> String {
+    let preview = body
+        .split_whitespace()
+        .take(20)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.is_empty() {
+        String::new()
+    } else {
+        format!("{preview:?}")
+    }
 }
 
 /// Parse a release name like "2024-01" into (year, month).
