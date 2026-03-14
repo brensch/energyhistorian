@@ -2,10 +2,11 @@ FROM rust:1.92-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
+COPY apps/ai-api ./apps/ai-api
 COPY src ./src
 COPY crates ./crates
 
-RUN cargo build --release --locked
+RUN cargo build --release --locked -p energyhistorian
 
 FROM debian:bookworm-slim AS runtime
 
