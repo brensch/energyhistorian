@@ -116,7 +116,9 @@ services:
       ALLOW_DEV_AUTH: "true"
       WORKOS_ISSUER: http://workos.invalid
       WORKOS_AUDIENCE: dev-client
-      LLM_PROVIDER: openai
+      LLM_PROVIDER: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}

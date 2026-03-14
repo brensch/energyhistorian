@@ -49,6 +49,13 @@ export interface Plan {
   data_description: string;
   note: string;
   chart_title: string;
+  chart_type: string;
+  x?: string | null;
+  y: string[];
+  y2: string[];
+  color?: string | null;
+  y_label?: string | null;
+  y2_label?: string | null;
   confidence: string;
   reason: string;
 }

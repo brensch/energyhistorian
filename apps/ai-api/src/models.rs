@@ -38,6 +38,20 @@ pub struct Plan {
     pub data_description: String,
     pub note: String,
     pub chart_title: String,
+    #[serde(default)]
+    pub chart_type: String,
+    #[serde(default)]
+    pub x: Option<String>,
+    #[serde(default)]
+    pub y: Vec<String>,
+    #[serde(default)]
+    pub y2: Vec<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub y_label: Option<String>,
+    #[serde(default)]
+    pub y2_label: Option<String>,
     pub confidence: String,
     pub reason: String,
 }

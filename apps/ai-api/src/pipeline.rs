@@ -1,6 +1,6 @@
 use std::{collections::HashSet, time::Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -19,6 +19,9 @@ use crate::{
 
 const MAX_ATTEMPTS: usize = 3;
 const MAX_ANSWER_ATTEMPTS: usize = 2;
+const PLAN_MAX_TOKENS: u32 = 1600;
+const REPAIR_MAX_TOKENS: u32 = 1600;
+const ANSWER_MAX_TOKENS: u32 = 400;
 
 pub async fn execute_chat(
     state: AppState,
@@ -118,6 +121,7 @@ pub async fn execute_chat(
     if registry.is_empty() {
         bail!("semantic registry is empty");
     }
+    let filtered_registry = filter_registry_for_question(&request.question, &registry);
 
     emit_status(&sender, "planning", "Planning query").await;
     let mut plan = enforce_semantic_contract(
@@ -126,7 +130,7 @@ pub async fn execute_chat(
             &state,
             &user,
             &request.question,
-            &registry,
+            &filtered_registry,
             request.approved_proposal.as_deref(),
             &prompt_context,
             run_id,
@@ -137,7 +141,7 @@ pub async fn execute_chat(
         &state,
         &user,
         &request.question,
-        &registry,
+        &filtered_registry,
         plan,
         run_id,
     )
@@ -223,7 +227,7 @@ pub async fn execute_chat(
                 &state,
                 &user,
                 &request.question,
-                &registry,
+                &filtered_registry,
                 &plan,
                 last_error.as_deref().unwrap_or("unknown error"),
                 &prompt_context,
@@ -235,7 +239,7 @@ pub async fn execute_chat(
             &state,
             &user,
             &request.question,
-            &registry,
+            &filtered_registry,
             plan,
             run_id,
         )
@@ -262,18 +266,8 @@ pub async fn execute_chat(
         return Ok(());
     };
 
-    emit_status(&sender, "chart", "Shaping chart").await;
-    let chart = match plan_chart(
-        &state,
-        &user,
-        &request.question,
-        &plan,
-        &preview,
-        &prompt_context,
-        run_id,
-    )
-    .await
-    {
+    emit_status(&sender, "chart", "Building chart").await;
+    let chart = match build_chart_spec_for_plan(&preview, &plan) {
         Ok(chart) if validate_chart_spec(&chart, &preview).is_ok() => chart,
         _ => build_chart_spec(&preview, &plan.chart_title),
     };
@@ -337,9 +331,10 @@ async fn plan_question(
 ) -> Result<Plan> {
     let response = state
         .llm
-        .json_completion(
+        .json_completion_with_max_tokens(
             &prompts::planner_system_prompt(),
             &prompts::planner_user_prompt(question, registry, approved_proposal, thread_context),
+            PLAN_MAX_TOKENS,
         )
         .await?;
     log_llm_usage(state, user, run_id, "planner", &response).await?;
@@ -358,9 +353,10 @@ async fn repair_plan(
 ) -> Result<Plan> {
     let response = state
         .llm
-        .json_completion(
+        .json_completion_with_max_tokens(
             &prompts::repair_system_prompt(),
             &prompts::repair_user_prompt(question, registry, plan, error, thread_context),
+            REPAIR_MAX_TOKENS,
         )
         .await?;
     log_llm_usage(state, user, run_id, "repair", &response).await?;
@@ -409,7 +405,10 @@ async fn refine_answer(
                 )
             };
 
-        let response = state.llm.json_completion(system_prompt, &user_prompt).await?;
+        let response = state
+            .llm
+            .json_completion_with_max_tokens(system_prompt, &user_prompt, ANSWER_MAX_TOKENS)
+            .await?;
         log_llm_usage(state, user, run_id, prompt_type, &response).await?;
         let answer = extract_json::<FinalAnswer>(&response.text)?;
         if let Err(reason) = validate_final_answer(&answer) {
@@ -424,32 +423,6 @@ async fn refine_answer(
     }
 
     bail!("answer generation failed")
-}
-
-async fn plan_chart(
-    state: &AppState,
-    user: &AuthUser,
-    question: &str,
-    plan: &Plan,
-    preview: &QueryPreview,
-    thread_context: &Value,
-    run_id: Uuid,
-) -> Result<ChartSpec> {
-    let response = state
-        .llm
-        .json_completion(
-            prompts::chart_system_prompt(),
-            &prompts::chart_user_prompt(
-                question,
-                plan,
-                &preview.columns,
-                &preview.rows,
-                thread_context,
-            ),
-        )
-        .await?;
-    log_llm_usage(state, user, run_id, "chart", &response).await?;
-    Ok(extract_json::<ChartSpec>(&response.text)?)
 }
 
 async fn log_llm_usage(
@@ -610,6 +583,13 @@ async fn maybe_redirect_partial_actual_generation_plan(
             data_description: "The metered actual-generation surface currently available in the warehouse has partial DUID coverage and is not reliable for whole-of-market fuel-mix breakdowns.".to_string(),
             note: "Blocked because the current plan still relied on a partial actual-generation surface that would materially undercount major fuels. Use the dispatch surface instead for a proxy answer, or add a fuller metered-generation dataset.".to_string(),
             chart_title: repaired.chart_title,
+            chart_type: repaired.chart_type,
+            x: repaired.x,
+            y: repaired.y,
+            y2: repaired.y2,
+            color: repaired.color,
+            y_label: repaired.y_label,
+            y2_label: repaired.y2_label,
             confidence: "low".to_string(),
             reason: "semantic.actual_gen_duid is unsuitable for broad fuel-mix breakdowns because its coverage is partial.".to_string(),
         });
@@ -683,6 +663,13 @@ fn enforce_semantic_contract(question: &str, plan: Plan) -> Plan {
             data_description: "The current semantic layer exposes dispatch, generation, bids, prices, and registration metadata, but not physical fuel-consumption or inventory measurements.".to_string(),
             note: "Blocked because the question asks about physical fuel use or inventory, and answering from dispatch or generation proxies would be misleading.".to_string(),
             chart_title: plan.chart_title,
+            chart_type: plan.chart_type,
+            x: plan.x,
+            y: plan.y,
+            y2: plan.y2,
+            color: plan.color,
+            y_label: plan.y_label,
+            y2_label: plan.y2_label,
             confidence: "low".to_string(),
             reason: "No physical fuel-consumption or inventory dataset exists in the current semantic surface.".to_string(),
         };
@@ -752,6 +739,63 @@ fn plan_uses_actual_gen_duid(plan: &Plan) -> bool {
         .any(|item| item == "semantic.actual_gen_duid")
 }
 
+fn filter_registry_for_question(question: &str, registry: &[SemanticObject]) -> Vec<SemanticObject> {
+    let lowered_question = question.to_ascii_lowercase();
+    let tokens = lowered_question
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3)
+        .collect::<Vec<_>>();
+
+    let mut scored = registry
+        .iter()
+        .map(|item| {
+            let haystack = format!(
+                "{} {} {} {} {} {} {} {}",
+                item.object_name,
+                item.description,
+                item.grain,
+                item.time_column,
+                item.dimensions.join(" "),
+                item.measures.join(" "),
+                item.join_keys.join(" "),
+                item.question_tags.join(" ")
+            )
+            .to_ascii_lowercase();
+            let mut score = 0usize;
+            for token in &tokens {
+                if haystack.contains(*token) {
+                    score += 1;
+                }
+            }
+            for tag in &item.question_tags {
+                let tag = tag.to_ascii_lowercase();
+                if !tag.is_empty() && lowered_question.contains(&tag) {
+                    score += 3;
+                }
+            }
+            (score, item.clone())
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.object_name.cmp(&b.1.object_name))
+    });
+
+    let selected = scored
+        .into_iter()
+        .filter(|(score, _)| *score > 0)
+        .take(14)
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        registry.iter().take(14).cloned().collect()
+    } else {
+        selected
+    }
+}
+
 fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
     if preview.row_count <= 1 {
         return ChartSpec::Summary {
@@ -813,6 +857,44 @@ fn build_chart_spec(preview: &QueryPreview, title: &str) -> ChartSpec {
     }
 }
 
+fn build_chart_spec_for_plan(preview: &QueryPreview, plan: &Plan) -> Result<ChartSpec> {
+    let chart_type = plan.chart_type.trim().to_ascii_lowercase();
+    if chart_type.is_empty() {
+        bail!("plan omitted chart_type");
+    }
+    if chart_type == "summary" {
+        return Ok(ChartSpec::Summary {
+            title: plan.chart_title.clone(),
+        });
+    }
+    if chart_type == "table" {
+        return Ok(ChartSpec::Table {
+            title: plan.chart_title.clone(),
+        });
+    }
+
+    let x = plan
+        .x
+        .clone()
+        .or_else(|| infer_chart_x(preview))
+        .ok_or_else(|| anyhow!("plan omitted x axis"))?;
+    let y = if plan.y.is_empty() {
+        infer_chart_y(preview)
+    } else {
+        plan.y.clone()
+    };
+    if y.is_empty() {
+        bail!("plan omitted y axis");
+    }
+
+    match chart_type.as_str() {
+        "line" | "bar" | "scatter" | "area" => Ok(build_plotly_chart_from_plan(preview, plan, &x, &y)),
+        "pie" => Ok(build_plotly_pie_chart(preview, plan, &x, &y[0])),
+        "box" => Ok(build_plotly_box_chart(preview, plan, &x, &y[0])),
+        _ => bail!("unsupported chart_type `{chart_type}`"),
+    }
+}
+
 fn validate_chart_spec(chart: &ChartSpec, preview: &QueryPreview) -> Result<()> {
     match chart {
         ChartSpec::Summary { .. } | ChartSpec::Table { .. } => Ok(()),
@@ -852,6 +934,110 @@ fn build_plotly_chart(
     ChartSpec::Plotly {
         title: title.to_string(),
         figure,
+    }
+}
+
+fn build_plotly_chart_from_plan(
+    preview: &QueryPreview,
+    plan: &Plan,
+    x: &str,
+    y: &[String],
+) -> ChartSpec {
+    let mark_type = plan.chart_type.trim().to_ascii_lowercase();
+    let stacked = mark_type == "area";
+    let figure = build_plotly_figure(
+        preview,
+        &plan.chart_title,
+        &mark_type,
+        x,
+        y,
+        plan.color.as_deref(),
+        stacked,
+        false,
+    );
+    let mut figure = figure;
+    if let Some(layout) = figure.get_mut("layout").and_then(Value::as_object_mut) {
+        if let Some(y_label) = &plan.y_label {
+            layout.insert(
+                "yaxis".to_string(),
+                merge_axis_title(layout.get("yaxis").cloned(), y_label),
+            );
+        }
+        if let Some(xaxis) = layout.get_mut("xaxis").and_then(Value::as_object_mut) {
+            if let Some(title) = xaxis.get_mut("title").and_then(Value::as_object_mut) {
+                if title.get("text").is_none() {
+                    title.insert("text".to_string(), json!(axis_title_for_column(preview, x)));
+                }
+            }
+        }
+    }
+    ChartSpec::Plotly {
+        title: plan.chart_title.clone(),
+        figure,
+    }
+}
+
+fn build_plotly_pie_chart(preview: &QueryPreview, plan: &Plan, x: &str, y: &str) -> ChartSpec {
+    let rows = preview_rows_as_objects(preview);
+    let labels = rows
+        .iter()
+        .map(|row| row.get(x).cloned().unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
+    let values = rows
+        .iter()
+        .map(|row| row.get(y).cloned().unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
+    ChartSpec::Plotly {
+        title: plan.chart_title.clone(),
+        figure: json!({
+            "data": [{
+                "type": "pie",
+                "labels": labels,
+                "values": values,
+                "textinfo": "label+percent",
+                "hovertemplate": format!("{}: %{{label}}<br>{}: %{{value}}<extra></extra>", prettify_column(x), plan.y_label.clone().unwrap_or_else(|| axis_title_for_column(preview, y)))
+            }],
+            "layout": base_layout(&plan.chart_title, None, None, false, false),
+            "config": base_config()
+        }),
+    }
+}
+
+fn build_plotly_box_chart(preview: &QueryPreview, plan: &Plan, x: &str, y: &str) -> ChartSpec {
+    let rows = preview_rows_as_objects(preview);
+    let groups = group_rows_by(&rows, x);
+    let palette = [
+        "#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#f87171", "#22d3ee", "#84cc16",
+    ];
+    let traces = groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, (group, group_rows))| {
+            let values = group_rows
+                .iter()
+                .map(|row| row.get(y).cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>();
+            json!({
+                "type": "box",
+                "name": group,
+                "y": values,
+                "marker": { "color": palette[index % palette.len()] }
+            })
+        })
+        .collect::<Vec<_>>();
+    ChartSpec::Plotly {
+        title: plan.chart_title.clone(),
+        figure: json!({
+            "data": traces,
+            "layout": base_layout(
+                &plan.chart_title,
+                None,
+                Some(plan.y_label.clone().unwrap_or_else(|| axis_title_for_column(preview, y))),
+                false,
+                false
+            ),
+            "config": base_config()
+        }),
     }
 }
 
@@ -960,36 +1146,67 @@ fn build_plotly_figure(
 
     json!({
         "data": traces,
-        "layout": {
-            "title": { "text": title, "x": 0.02, "font": { "family": "Space Grotesk, sans-serif", "color": "#f5f5f5", "size": 16 } },
-            "paper_bgcolor": "rgba(0,0,0,0)",
-            "plot_bgcolor": "rgba(0,0,0,0)",
-            "font": { "family": "Space Grotesk, sans-serif", "color": "#d4d4d4" },
-            "height": 360,
-            "margin": { "t": 56, "r": 24, "b": 44, "l": if horizontal { 140 } else { 52 } },
-            "legend": { "orientation": "h", "x": 0, "y": 1.12, "font": { "color": "#a3a3a3" } },
-            "barmode": if stacked { "stack" } else { "group" },
-            "xaxis": {
-                "title": { "text": if horizontal { axis_title_for_column(preview, &y[0]) } else { axis_title_for_column(preview, x) }, "font": { "color": "#a3a3a3", "size": 12 } },
-                "gridcolor": "rgba(64,64,64,0.45)",
-                "zerolinecolor": "rgba(64,64,64,0.45)",
-                "linecolor": "rgba(82,82,82,0.7)",
-                "automargin": true
-            },
-            "yaxis": {
-                "title": { "text": if horizontal { axis_title_for_column(preview, x) } else { axis_title_for_column(preview, &y[0]) }, "font": { "color": "#a3a3a3", "size": 12 } },
-                "gridcolor": "rgba(64,64,64,0.45)",
-                "zerolinecolor": "rgba(64,64,64,0.45)",
-                "linecolor": "rgba(82,82,82,0.7)",
-                "automargin": true
-            }
+        "layout": base_layout(
+            title,
+            Some(if horizontal { axis_title_for_column(preview, &y[0]) } else { axis_title_for_column(preview, x) }),
+            Some(if horizontal { axis_title_for_column(preview, x) } else { axis_title_for_column(preview, &y[0]) }),
+            stacked,
+            horizontal
+        ),
+        "config": base_config()
+    })
+}
+
+fn base_layout(
+    title: &str,
+    x_title: Option<String>,
+    y_title: Option<String>,
+    stacked: bool,
+    horizontal: bool,
+) -> Value {
+    json!({
+        "title": { "text": title, "x": 0.02, "font": { "family": "Space Grotesk, sans-serif", "color": "#f5f5f5", "size": 16 } },
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "font": { "family": "Space Grotesk, sans-serif", "color": "#d4d4d4" },
+        "height": 360,
+        "margin": { "t": 56, "r": 24, "b": 44, "l": if horizontal { 140 } else { 52 } },
+        "legend": { "orientation": "h", "x": 0, "y": 1.12, "font": { "color": "#a3a3a3" } },
+        "barmode": if stacked { "stack" } else { "group" },
+        "xaxis": {
+            "title": { "text": x_title, "font": { "color": "#a3a3a3", "size": 12 } },
+            "gridcolor": "rgba(64,64,64,0.45)",
+            "zerolinecolor": "rgba(64,64,64,0.45)",
+            "linecolor": "rgba(82,82,82,0.7)",
+            "automargin": true
         },
-        "config": {
-            "responsive": true,
-            "displaylogo": false,
-            "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+        "yaxis": {
+            "title": { "text": y_title, "font": { "color": "#a3a3a3", "size": 12 } },
+            "gridcolor": "rgba(64,64,64,0.45)",
+            "zerolinecolor": "rgba(64,64,64,0.45)",
+            "linecolor": "rgba(82,82,82,0.7)",
+            "automargin": true
         }
     })
+}
+
+fn base_config() -> Value {
+    json!({
+        "responsive": true,
+        "displaylogo": false,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+    })
+}
+
+fn merge_axis_title(existing_axis: Option<Value>, label: &str) -> Value {
+    let mut axis = existing_axis.unwrap_or_else(|| json!({}));
+    if let Some(object) = axis.as_object_mut() {
+        object.insert(
+            "title".to_string(),
+            json!({ "text": label, "font": { "color": "#a3a3a3", "size": 12 } }),
+        );
+    }
+    axis
 }
 
 fn compact_thread_context(messages: &[ThreadContextMessage]) -> Value {
@@ -1053,6 +1270,13 @@ fn maybe_build_visualization_follow_up(
         data_description: "Reused the previous query result from this conversation and changed only the visualization.".to_string(),
         note: "No new SQL was run. This chart reuses the prior result from the thread.".to_string(),
         chart_title: chart_title(&chart).to_string(),
+        chart_type: "bar".to_string(),
+        x: None,
+        y: Vec::new(),
+        y2: Vec::new(),
+        color: None,
+        y_label: None,
+        y2_label: None,
         confidence: "high".to_string(),
         reason: "The user requested a visualization change on the previous result set.".to_string(),
     };
@@ -1281,20 +1505,27 @@ fn base_plotly_trace(
 ) -> Value {
     let axis_x = if horizontal { y_values } else { x_values };
     let axis_y = if horizontal { x_values } else { y_values };
-    let trace_type = if mark_type == "line" {
-        "scatter"
-    } else {
-        "bar"
+    let (trace_type, mode, orientation, fill) = match mark_type {
+        "line" => ("scatter", Some("lines+markers"), None::<&str>, None::<&str>),
+        "scatter" => ("scatter", Some("markers"), None::<&str>, None::<&str>),
+        "area" => ("scatter", Some("lines"), None::<&str>, Some("tozeroy")),
+        _ => (
+            "bar",
+            None::<&str>,
+            if horizontal { Some("h") } else { None::<&str> },
+            None::<&str>,
+        ),
     };
     json!({
         "type": trace_type,
-        "mode": if mark_type == "line" { Some("lines+markers") } else { None::<&str> },
-        "orientation": if horizontal && mark_type == "bar" { Some("h") } else { None::<&str> },
+        "mode": mode,
+        "orientation": orientation,
         "x": axis_x,
         "y": axis_y,
         "name": name,
         "marker": { "color": color },
         "line": { "color": color, "width": 2.5 },
+        "fill": fill,
         "customdata": transpose_customdata(customdata),
         "hovertemplate": plotly_hover_template(columns),
     })
@@ -1587,6 +1818,13 @@ mod tests {
                 data_description: String::new(),
                 note: String::new(),
                 chart_title: "Gas".to_string(),
+                chart_type: "table".to_string(),
+                x: None,
+                y: Vec::new(),
+                y2: Vec::new(),
+                color: None,
+                y_label: None,
+                y2_label: None,
                 confidence: "medium".to_string(),
                 reason: String::new(),
             },

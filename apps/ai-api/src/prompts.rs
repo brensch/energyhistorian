@@ -4,14 +4,36 @@ use serde_json::Value;
 
 use crate::models::{Plan, SemanticObject};
 
+const RULES: &str = include_str!("../rules.md");
+
 pub const REGION_ALIAS_GUIDANCE: &str = "Canonical NEM region IDs are NSW1, QLD1, VIC1, SA1, TAS1, and SNOWY1. Normalize natural-language region names before writing SQL. Do not use VIC, NSW, QLD, SA, or TAS in REGIONID filters.";
 
 pub const PHYSICAL_FUEL_BLOCK_GUIDANCE: &str = "Do not answer questions about physical fuel consumed, gas used, coal burned, stockpiles, or inventories with dispatch or generation proxies. Block those unless the registry explicitly includes that physical dataset.";
 pub const FUEL_MIX_SURFACE_GUIDANCE: &str = "For whole-of-market or region-wide generation breakdowns by fuel type, do not use semantic.actual_gen_duid because it has partial metered coverage and can badly undercount major fuels. Prefer semantic.daily_unit_dispatch joined to semantic.unit_dimension and use TOTALCLEARED * 0.5 as a dispatch-energy proxy, clearly noting that it is a dispatch proxy rather than metered generation. Use semantic.actual_gen_duid only for DUID-specific actual-output questions or questions explicitly about that metered surface.";
 
+fn output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "status": "answerable|blocked",
+        "sql": "string",
+        "used_objects": ["semantic.object_name"],
+        "data_description": "string",
+        "note": "string",
+        "chart_title": "string",
+        "chart_type": "line|bar|scatter|table|area|pie|box",
+        "x": "string|null",
+        "y": ["column_name"],
+        "y2": ["column_name"],
+        "color": "string|null",
+        "y_label": "string|null",
+        "y2_label": "string|null",
+        "confidence": "high|medium|low",
+        "reason": "string"
+    })
+}
+
 pub fn planner_system_prompt() -> String {
     format!(
-        "You are a careful NEM analytics planner. You must decide whether the user's question can be answered from the provided semantic registry. If answerable, write one read-only ClickHouse SQL query using only semantic.* objects from the registry. If not answerable, return blocked with an empty SQL string. Prefer concise SQL with explicit grouping and limits. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} {FUEL_MIX_SURFACE_GUIDANCE} Return JSON only."
+        "You are a careful NEM analytics planner. You must decide whether the user's question can be answered from the provided semantic registry. If answerable, write one read-only ClickHouse SQL query using only semantic.* objects from the registry and choose the chart configuration in the same response. If not answerable, return blocked with an empty SQL string. Prefer concise SQL with explicit grouping and limits. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} {FUEL_MIX_SURFACE_GUIDANCE}\n\n{RULES}\n\nReturn JSON only."
     )
 }
 
@@ -26,16 +48,7 @@ pub fn planner_user_prompt(
         "approved_visualization_plan": approved,
         "thread_context": thread_context,
         "today": Utc::now().date_naive().to_string(),
-        "required_output_schema": {
-            "status": "answerable|blocked",
-            "sql": "string",
-            "used_objects": ["semantic.object_name"],
-            "data_description": "string",
-            "note": "string",
-            "chart_title": "string",
-            "confidence": "high|medium|low",
-            "reason": "string"
-        },
+        "required_output_schema": output_schema(),
         "semantic_registry": registry
     });
     serde_json::to_string_pretty(&payload).expect("planner prompt")
@@ -43,7 +56,7 @@ pub fn planner_user_prompt(
 
 pub fn repair_system_prompt() -> String {
     format!(
-        "You are repairing a failed ClickHouse SQL plan for Australia's National Electricity Market. Keep the same JSON schema as before. Only use semantic.* objects from the registry. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} {FUEL_MIX_SURFACE_GUIDANCE} If the question cannot be answered cleanly, return blocked. Return JSON only."
+        "You are repairing a failed ClickHouse SQL plan for Australia's National Electricity Market. Keep the same JSON schema as before. Only use semantic.* objects from the registry. {REGION_ALIAS_GUIDANCE} {PHYSICAL_FUEL_BLOCK_GUIDANCE} {FUEL_MIX_SURFACE_GUIDANCE}\n\n{RULES}\n\nIf the question cannot be answered cleanly, return blocked. Return JSON only."
     )
 }
 
@@ -60,80 +73,17 @@ pub fn repair_user_prompt(
         "failing_plan": plan,
         "error": error,
         "semantic_registry": registry,
-        "required_output_schema": {
-            "status": "answerable|blocked",
-            "sql": "string",
-            "used_objects": ["semantic.object_name"],
-            "data_description": "string",
-            "note": "string",
-            "chart_title": "string",
-            "confidence": "high|medium|low",
-            "reason": "string"
-        }
+        "required_output_schema": output_schema()
     });
     serde_json::to_string_pretty(&payload).expect("repair prompt")
 }
 
 pub fn answer_system_prompt() -> &'static str {
-    "You are a careful NEM analyst. Write a concise answer to the user's question based on the query result and a short analyst note. State the substantive answer first. Focus on key insights, comparisons, extremes, trends, or notable caveats. Do not narrate the chart. Do not restate the table schema, column list, row count, date coverage, or print raw rows unless the user explicitly asked for that. Do not say things like 'the chart shows', 'the table contains', or 'Total rows'. Never provide code, pseudocode, Python, matplotlib, pandas, Plotly JSON, or instructions for how to produce a chart. The application already renders the chart. Avoid generic meta-commentary. Respect the provided caveats and confidence. Return JSON only with keys answer and note."
+    "You are a careful NEM analyst. The query result is already the answer surface. Write a concise answer to the user's question based on the query result and a short analyst note. State the substantive answer first. Focus on key insights, comparisons, extremes, trends, or notable caveats. If the result is an approximation or proxy, say that plainly. Do not narrate the chart. Do not restate the table schema, column list, row count, date coverage, or print raw rows unless the user explicitly asked for that. Do not say things like 'the chart shows', 'the table contains', or 'Total rows'. Never provide code, pseudocode, Python, matplotlib, pandas, Plotly JSON, or instructions for how to produce a chart. The application already renders the chart. Avoid generic meta-commentary. Respect the provided caveats and confidence. Return JSON only with keys answer and note."
 }
 
 pub fn answer_repair_system_prompt() -> &'static str {
     "You are repairing an analytics answer that violated product rules. Return a concise direct answer to the question, not instructions. Never include code, code fences, pseudocode, Python, matplotlib, pandas, Plotly JSON, or implementation steps. Never narrate the chart or describe table structure. The chart is already rendered by the product. Return JSON only with keys answer and note."
-}
-
-pub fn chart_system_prompt() -> &'static str {
-    "You are a careful analytics visualization planner. Choose the most useful chart for the query result. You may return renderer=summary, renderer=table, or renderer=plotly. If you return plotly, return a valid Plotly figure JSON object with keys data, layout, and optional config. The frontend will render it directly. Use only fields present in the query result. Build the trace arrays directly from the provided result preview rows. Prefer readable charts over clever ones: rankings usually want horizontal bars, time series usually want lines, composition over time can use stacked bars or areas, and dense wide outputs should fall back to a table. Avoid redundant encodings like coloring every unique bar by its own label or coloring by a field that is nearly constant. Prefer human-readable labels like station names over opaque IDs like DUID when both are available, and prefer small meaningful groupings like region for color when useful. Keep the layout compact and chat-friendly. Return JSON only."
-}
-
-pub fn chart_user_prompt(
-    question: &str,
-    plan: &Plan,
-    columns: &[String],
-    rows: &[Vec<serde_json::Value>],
-    thread_context: &Value,
-) -> String {
-    let payload = serde_json::json!({
-        "question": question,
-        "thread_context": thread_context,
-        "plan": {
-            "data_description": plan.data_description,
-            "note": plan.note,
-            "chart_title": plan.chart_title,
-            "used_objects": plan.used_objects,
-        },
-        "chart_requirements": {
-            "allowed_renderers": ["summary", "table", "plotly"],
-            "forbidden": [
-                "fields not present in the result",
-                "redundant color encodings on unique categories"
-            ]
-        },
-        "results_summary": {
-            "row_count": rows.len(),
-            "columns": columns,
-            "preview": rows.iter().take(20).collect::<Vec<_>>()
-        },
-        "required_output_examples": {
-            "summary": {
-                "renderer": "summary",
-                "title": "string"
-            },
-            "table": {
-                "renderer": "table",
-                "title": "string"
-            },
-            "plotly": {
-                "renderer": "plotly",
-                "title": "string",
-                "figure": {
-                    "data": [],
-                    "layout": {}
-                }
-            }
-        }
-    });
-    serde_json::to_string_pretty(&payload).expect("chart prompt")
 }
 
 pub fn answer_user_prompt(

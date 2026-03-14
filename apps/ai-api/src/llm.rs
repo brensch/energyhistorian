@@ -39,19 +39,34 @@ impl LlmClient {
     }
 
     pub async fn json_completion(&self, system: &str, user: &str) -> Result<CompletionResponse> {
+        self.json_completion_with_max_tokens(system, user, 2048).await
+    }
+
+    pub async fn json_completion_with_max_tokens(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<CompletionResponse> {
         match self.provider {
-            LlmProvider::OpenAi => self.openai_completion(system, user).await,
-            LlmProvider::Anthropic => self.anthropic_completion(system, user).await,
+            LlmProvider::OpenAi => self.openai_completion(system, user, max_tokens).await,
+            LlmProvider::Anthropic => self.anthropic_completion(system, user, max_tokens).await,
         }
     }
 
-    async fn openai_completion(&self, system: &str, user: &str) -> Result<CompletionResponse> {
+    async fn openai_completion(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<CompletionResponse> {
         let api_key = self
             .openai_api_key
             .as_deref()
             .ok_or_else(|| anyhow!("OPENAI_API_KEY missing"))?;
         let payload = serde_json::json!({
             "model": self.openai_model,
+            "max_output_tokens": max_tokens,
             "input": [
                 { "role": "system", "content": [{ "type": "input_text", "text": system }] },
                 { "role": "user", "content": [{ "type": "input_text", "text": user }] }
@@ -105,14 +120,19 @@ impl LlmClient {
         })
     }
 
-    async fn anthropic_completion(&self, system: &str, user: &str) -> Result<CompletionResponse> {
+    async fn anthropic_completion(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<CompletionResponse> {
         let api_key = self
             .anthropic_api_key
             .as_deref()
             .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY missing"))?;
         let payload = serde_json::json!({
             "model": self.anthropic_model,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
             "system": system,
             "messages": [
                 {
