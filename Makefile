@@ -1,5 +1,5 @@
 DATA_DIR ?= ./data
-CH = set -a; [ -f .env ] && . ./.env; set +a; : "$${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}"; : "$${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}"; docker compose exec clickhouse clickhouse-client --user "$${CLICKHOUSE_ADMIN_USER}" --password "$${CLICKHOUSE_ADMIN_PASSWORD}"
+CH = set -a; [ -f .env ] && . ./.env; set +a; : "$${CLICKHOUSE_URL:?CLICKHOUSE_URL is required}"; : "$${CLICKHOUSE_HISTORIAN_USER:?CLICKHOUSE_HISTORIAN_USER is required}"; : "$${CLICKHOUSE_HISTORIAN_PASSWORD:?CLICKHOUSE_HISTORIAN_PASSWORD is required}"; curl -fsS --user "$${CLICKHOUSE_HISTORIAN_USER}:$${CLICKHOUSE_HISTORIAN_PASSWORD}" --url "$${CLICKHOUSE_URL}" --data-binary
 
 .PHONY: run run-watch ai-api-watch postgres-up clickhouse-provision-users build web-dev web-build status stats tables views ch
 
@@ -60,19 +60,22 @@ status:
 	@curl -s http://localhost:8080/status | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))"
 
 stats:
-	@$(CH) --query "SELECT database, count() AS tables, sum(total_rows) AS rows, \
+	@$(CH) "SELECT database, count() AS tables, sum(total_rows) AS rows, \
 		formatReadableSize(sum(total_bytes)) AS size \
 		FROM system.tables \
 		WHERE database LIKE 'raw_%' OR database = 'semantic' \
-		GROUP BY database ORDER BY database"
+		GROUP BY database ORDER BY database \
+		FORMAT PrettyCompactMonoBlock"
 
 tables:
-	@$(CH) --query "SELECT database, name, total_rows FROM system.tables \
+	@$(CH) "SELECT database, name, total_rows FROM system.tables \
 		WHERE (database LIKE 'raw_%' OR database = 'semantic') AND total_rows > 0 \
-		ORDER BY database, total_rows DESC"
+		ORDER BY database, total_rows DESC \
+		FORMAT PrettyCompactMonoBlock"
 
 views:
-	@$(CH) --query "SELECT name FROM system.tables WHERE database = 'semantic' ORDER BY name"
+	@$(CH) "SELECT name FROM system.tables WHERE database = 'semantic' ORDER BY name \
+		FORMAT PrettyCompactMonoBlock"
 
 # ── SQLite ─────────────────────────────────────────────────────────
 queue:
@@ -88,12 +91,7 @@ cycle:
 
 # ── Interactive ────────────────────────────────────────────────────
 ch:
-	@set -a; \
-	[ -f .env ] && . ./.env; \
-	set +a; \
-	: "$${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}"; \
-	: "$${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}"; \
-	docker compose exec -it clickhouse clickhouse-client --user "$${CLICKHOUSE_ADMIN_USER}" --password "$${CLICKHOUSE_ADMIN_PASSWORD}"
+	@printf "Use make sql Q='SELECT ...' against $$CLICKHOUSE_URL from .env\n"
 
 sql:
-	@$(CH) --query "$(Q)"
+	@$(CH) "$(Q)"
