@@ -29,7 +29,6 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
       - "8123:8123"
-      - "9000:9000"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./deploy/clickhouse-config.xml:/etc/clickhouse-server/config.d/memory.xml:ro
