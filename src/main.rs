@@ -29,11 +29,11 @@ struct Args {
     clickhouse_url: String,
 
     /// ClickHouse user
-    #[arg(long, env = "CLICKHOUSE_USER", default_value = "energyhistorian")]
+    #[arg(long, env = "CLICKHOUSE_HISTORIAN_USER")]
     clickhouse_user: String,
 
     /// ClickHouse password
-    #[arg(long, env = "CLICKHOUSE_PASSWORD", default_value = "energyhistorian")]
+    #[arg(long, env = "CLICKHOUSE_HISTORIAN_PASSWORD")]
     clickhouse_password: String,
 
     /// Health/status HTTP listen address

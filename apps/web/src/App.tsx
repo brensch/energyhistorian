@@ -277,6 +277,14 @@ export default function App() {
     setLiveRun(null);
   }
 
+  function handleSignOut() {
+    setSidebarError(null);
+    setActiveConversationId(null);
+    setMessages([]);
+    setLiveRun(null);
+    auth.signOut();
+  }
+
   if (!auth.ready) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-neutral-900 text-neutral-400">
@@ -300,12 +308,16 @@ export default function App() {
             single interface.
           </p>
           <button
-            className="mt-8 rounded-2xl border border-neutral-700 bg-neutral-100 px-5 py-3 text-sm font-medium text-neutral-950 transition hover:bg-white"
+            className="mt-8 rounded-2xl border border-neutral-700 bg-neutral-100 px-5 py-3 text-sm font-medium text-neutral-950 transition hover:bg-white disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-800 disabled:text-neutral-500"
+            disabled={Boolean(auth.authError)}
             onClick={auth.signIn}
             type="button"
           >
             Sign in with WorkOS
           </button>
+          {auth.authError ? (
+            <p className="mt-4 text-sm leading-7 text-red-300">{auth.authError}</p>
+          ) : null}
         </section>
       </main>
     );
@@ -416,7 +428,7 @@ export default function App() {
               {!appConfig.enableDevAuth ? (
                 <button
                   className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-900"
-                  onClick={auth.signOut}
+                  onClick={handleSignOut}
                   type="button"
                 >
                   Sign out
@@ -439,13 +451,24 @@ export default function App() {
                 {conversationTitle ?? 'Start with one of the suggested prompts or ask your own.'}
               </div>
             </div>
-            <button
-              className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800 lg:hidden"
-              onClick={handleNewChat}
-              type="button"
-            >
-              New chat
-            </button>
+            <div className="flex items-center gap-2">
+              {!appConfig.enableDevAuth ? (
+                <button
+                  className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800 lg:hidden"
+                  onClick={handleSignOut}
+                  type="button"
+                >
+                  Sign out
+                </button>
+              ) : null}
+              <button
+                className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800 lg:hidden"
+                onClick={handleNewChat}
+                type="button"
+              >
+                New chat
+              </button>
+            </div>
           </div>
         </header>
 

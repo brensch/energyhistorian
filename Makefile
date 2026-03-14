@@ -1,14 +1,59 @@
 DATA_DIR ?= ./data
-CH = docker compose exec clickhouse clickhouse-client --user energyhistorian --password energyhistorian
+CH = set -a; [ -f .env ] && . ./.env; set +a; : "$${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}"; : "$${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}"; docker compose exec clickhouse clickhouse-client --user "$${CLICKHOUSE_ADMIN_USER}" --password "$${CLICKHOUSE_ADMIN_PASSWORD}"
 
-.PHONY: run build status stats tables views ch
+.PHONY: run run-watch ai-api-watch postgres-up clickhouse-provision-users build web-dev web-build status stats tables views ch
 
 # ── Run ────────────────────────────────────────────────────────────
 run:
 	RUST_LOG=info cargo run --package energyhistorian -- --data-dir $(DATA_DIR)
 
+run-watch:
+	RUST_LOG=info cargo watch \
+		-w src \
+		-w crates \
+		-w Cargo.toml \
+		-w Cargo.lock \
+		-x "run --package energyhistorian -- --data-dir $(DATA_DIR)"
+
+ai-api-watch:
+	docker compose --profile ai up -d postgres
+	RUST_LOG=info cargo watch \
+		-w apps/ai-api/src \
+		-w apps/ai-api/Cargo.toml \
+		-w Cargo.lock \
+		-x "run -p ai-api"
+
+postgres-up:
+	docker compose --profile ai up -d postgres
+
+clickhouse-provision-users:
+	@set -a; \
+	[ -f .env ] && . ./.env; \
+	set +a; \
+	/bin/sh ./scripts/provision_clickhouse_users.sh
+
 build:
 	cargo build --package energyhistorian --release
+
+web-dev:
+	@set -a; \
+	[ -f .env ] && . ./.env; \
+	set +a; \
+	VITE_API_BASE_URL="$${API_BASE_URL:-http://localhost:8090}" \
+	VITE_WORKOS_CLIENT_ID="$${WORKOS_CLIENT_ID:-}" \
+	VITE_WORKOS_API_HOSTNAME="$${WORKOS_API_HOSTNAME:-}" \
+	VITE_ENABLE_DEV_AUTH="$${ALLOW_DEV_AUTH:-false}" \
+	npm --prefix apps/web run dev
+
+web-build:
+	@set -a; \
+	[ -f .env ] && . ./.env; \
+	set +a; \
+	VITE_API_BASE_URL="$${API_BASE_URL:-http://localhost:8090}" \
+	VITE_WORKOS_CLIENT_ID="$${WORKOS_CLIENT_ID:-}" \
+	VITE_WORKOS_API_HOSTNAME="$${WORKOS_API_HOSTNAME:-}" \
+	VITE_ENABLE_DEV_AUTH="$${ALLOW_DEV_AUTH:-false}" \
+	npm --prefix apps/web run build
 
 # ── Observability ──────────────────────────────────────────────────
 status:
@@ -43,7 +88,12 @@ cycle:
 
 # ── Interactive ────────────────────────────────────────────────────
 ch:
-	docker compose exec -it clickhouse clickhouse-client --user energyhistorian --password energyhistorian
+	@set -a; \
+	[ -f .env ] && . ./.env; \
+	set +a; \
+	: "$${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}"; \
+	: "$${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}"; \
+	docker compose exec -it clickhouse clickhouse-client --user "$${CLICKHOUSE_ADMIN_USER}" --password "$${CLICKHOUSE_ADMIN_PASSWORD}"
 
 sql:
 	@$(CH) --query "$(Q)"

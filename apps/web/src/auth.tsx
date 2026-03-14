@@ -19,6 +19,7 @@ export interface AuthSession {
   isAuthenticated: boolean;
   user: AuthUser | null;
   accessToken: string | null;
+  authError: string | null;
   signIn: () => void;
   signOut: () => void;
   headers: Record<string, string>;
@@ -61,6 +62,15 @@ function WorkosBoundary({ children }: PropsWithChildren) {
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (window.location.pathname === '/login' && !isLoading && !user) {
+      void signIn();
+    }
+  }, [isLoading, signIn, user]);
+
+  useEffect(() => {
     let cancelled = false;
     async function syncToken() {
       if (!user) {
@@ -98,6 +108,7 @@ function WorkosBoundary({ children }: PropsWithChildren) {
           }
         : null,
       accessToken,
+      authError: null,
       signIn: () => {
         void signIn();
       },
@@ -121,6 +132,7 @@ function DevBoundary({ children }: PropsWithChildren) {
       isAuthenticated: true,
       user: DEV_USER,
       accessToken: null,
+      authError: null,
       signIn: () => undefined,
       signOut: () => undefined,
       headers: {
@@ -142,10 +154,26 @@ export function AppAuthProvider({ children }: PropsWithChildren) {
     return <DevBoundary>{children}</DevBoundary>;
   }
 
+  if (!appConfig.workosClientId) {
+    const session: AuthSession = {
+      ready: true,
+      isAuthenticated: false,
+      user: null,
+      accessToken: null,
+      authError:
+        'WorkOS client ID is missing. Set VITE_WORKOS_CLIENT_ID for Vite dev or configure workosClientId in public/config.js.',
+      signIn: () => undefined,
+      signOut: () => undefined,
+      headers: {},
+    };
+    return <AuthContextProvider value={session}>{children}</AuthContextProvider>;
+  }
+
   return (
     <AuthKitProvider
       clientId={appConfig.workosClientId}
       apiHostname={appConfig.workosApiHostname || undefined}
+      redirectUri={`${window.location.origin}/callback`}
     >
       <WorkosBoundary>{children}</WorkosBoundary>
     </AuthKitProvider>

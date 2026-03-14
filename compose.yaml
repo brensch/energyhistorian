@@ -9,8 +9,8 @@ services:
     environment:
       RUST_LOG: info
       CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: energyhistorian
-      CLICKHOUSE_PASSWORD: energyhistorian
+      CLICKHOUSE_HISTORIAN_USER: "${CLICKHOUSE_HISTORIAN_USER:?CLICKHOUSE_HISTORIAN_USER is required}"
+      CLICKHOUSE_HISTORIAN_PASSWORD: "${CLICKHOUSE_HISTORIAN_PASSWORD:?CLICKHOUSE_HISTORIAN_PASSWORD is required}"
       DATA_DIR: /data
       LISTEN_ADDR: "0.0.0.0:8080"
       DISCOVER_CONCURRENCY: "4"
@@ -24,8 +24,8 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.2
     environment:
-      CLICKHOUSE_USER: energyhistorian
-      CLICKHOUSE_PASSWORD: energyhistorian
+      CLICKHOUSE_USER: "${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}"
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
       - "8123:8123"
@@ -43,9 +43,9 @@ services:
           "CMD",
           "clickhouse-client",
           "--user",
-          "energyhistorian",
+          "${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}",
           "--password",
-          "energyhistorian",
+          "${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}",
           "--query",
           "SELECT 1",
         ]
@@ -57,47 +57,47 @@ services:
     profiles: ["ai"]
     image: postgres:16
     environment:
-      POSTGRES_USER: energyhistorian
-      POSTGRES_PASSWORD: energyhistorian
-      POSTGRES_DB: energyhistorian
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is required}"
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U energyhistorian -d energyhistorian"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 12
 
   clickhouse-bootstrap:
     profiles: ["ai"]
-    image: clickhouse/clickhouse-server:25.2
+    image: curlimages/curl:8.12.1
     depends_on:
       clickhouse:
         condition: service_healthy
+    environment:
+      CLICKHOUSE_ADMIN_URL: "http://clickhouse:8123/"
+      CLICKHOUSE_ADMIN_USER: "${CLICKHOUSE_ADMIN_USER:?CLICKHOUSE_ADMIN_USER is required}"
+      CLICKHOUSE_ADMIN_PASSWORD: "${CLICKHOUSE_ADMIN_PASSWORD:?CLICKHOUSE_ADMIN_PASSWORD is required}"
+      HISTORIAN_CH_USER: "${CLICKHOUSE_HISTORIAN_USER:?CLICKHOUSE_HISTORIAN_USER is required}"
+      HISTORIAN_CH_PASSWORD: "${CLICKHOUSE_HISTORIAN_PASSWORD:?CLICKHOUSE_HISTORIAN_PASSWORD is required}"
+      AI_API_CH_USER: "${CLICKHOUSE_AI_API_READ_USER:?CLICKHOUSE_AI_API_READ_USER is required}"
+      AI_API_CH_PASSWORD: "${CLICKHOUSE_AI_API_READ_PASSWORD:?CLICKHOUSE_AI_API_READ_PASSWORD is required}"
+      SEMANTIC_DB: "${CLICKHOUSE_VIEW_DB:-semantic}"
+      TRACKING_DB: "${CLICKHOUSE_USAGE_DB:-tracking}"
+      RAW_DATABASES: "${CLICKHOUSE_RAW_DATABASES:-raw_aemo_nemweb,raw_aemo_mmsdm,raw_aemo_metadata_dvd,raw_aemo_metadata_html}"
+    volumes:
+      - ./scripts/provision_clickhouse_users.sh:/scripts/provision_clickhouse_users.sh:ro
     entrypoint:
-      - /bin/bash
-      - -lc
-      - |
-        set -euo pipefail
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "CREATE USER IF NOT EXISTS ai_api_readonly IDENTIFIED BY 'ai_api_readonly'"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "ALTER USER ai_api_readonly SETTINGS readonly = 1"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON semantic.* TO ai_api_readonly"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_nemweb.* TO ai_api_readonly"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_mmsdm.* TO ai_api_readonly"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_metadata_dvd.* TO ai_api_readonly"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON raw_aemo_metadata_html.* TO ai_api_readonly"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON system.columns TO ai_api_readonly"
-        clickhouse-client --host clickhouse --user energyhistorian --password energyhistorian --query "GRANT SELECT ON system.tables TO ai_api_readonly"
+      - /bin/sh
+      - /scripts/provision_clickhouse_users.sh
 
   ai-api:
     profiles: ["ai"]
     build:
       context: .
       dockerfile: apps/ai-api/Dockerfile
-    env_file:
-      - .env
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -107,13 +107,16 @@ services:
         condition: service_healthy
     environment:
       AI_API_PORT: "${AI_API_PORT:-8090}"
-      DATABASE_URL: "${DATABASE_URL:-postgres://energyhistorian:energyhistorian@postgres:5432/energyhistorian}"
-      CLICKHOUSE_READ_URL: "${CLICKHOUSE_READ_URL:-http://ai_api_readonly:ai_api_readonly@clickhouse:8123/default}"
-      CLICKHOUSE_WRITE_URL: "${CLICKHOUSE_WRITE_URL:-http://energyhistorian:energyhistorian@clickhouse:8123/tracking}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}"
+      CLICKHOUSE_URL: "${CLICKHOUSE_URL:-http://clickhouse:8123}"
+      CLICKHOUSE_AI_API_READ_USER: "${CLICKHOUSE_AI_API_READ_USER:?CLICKHOUSE_AI_API_READ_USER is required}"
+      CLICKHOUSE_AI_API_READ_PASSWORD: "${CLICKHOUSE_AI_API_READ_PASSWORD:?CLICKHOUSE_AI_API_READ_PASSWORD is required}"
+      CLICKHOUSE_HISTORIAN_USER: "${CLICKHOUSE_HISTORIAN_USER:?CLICKHOUSE_HISTORIAN_USER is required}"
+      CLICKHOUSE_HISTORIAN_PASSWORD: "${CLICKHOUSE_HISTORIAN_PASSWORD:?CLICKHOUSE_HISTORIAN_PASSWORD is required}"
       CLICKHOUSE_VIEW_DB: "${CLICKHOUSE_VIEW_DB:-semantic}"
       CLICKHOUSE_USAGE_DB: "${CLICKHOUSE_USAGE_DB:-tracking}"
       FRONTEND_URL: "${FRONTEND_URL:-http://localhost:3000}"
-      ALLOW_DEV_AUTH: "${ALLOW_DEV_AUTH:-true}"
+      ALLOW_DEV_AUTH: "${ALLOW_DEV_AUTH:-false}"
       WORKOS_ISSUER: "${WORKOS_ISSUER:-http://workos.invalid}"
       WORKOS_AUDIENCE: "${WORKOS_AUDIENCE:-dev-client}"
       LLM_PROVIDER: "${LLM_PROVIDER:-anthropic}"
@@ -134,8 +137,6 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
-    env_file:
-      - .env
     depends_on:
       ai-api:
         condition: service_started
@@ -143,7 +144,7 @@ services:
       API_BASE_URL: "${API_BASE_URL:-http://localhost:8090}"
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       WORKOS_API_HOSTNAME: ${WORKOS_API_HOSTNAME:-}
-      ENABLE_DEV_AUTH: "${ALLOW_DEV_AUTH:-true}"
+      ENABLE_DEV_AUTH: "${ALLOW_DEV_AUTH:-false}"
       DEV_USER_ID: dev-user
       DEV_USER_EMAIL: dev@example.com
       DEV_USER_NAME: Developer

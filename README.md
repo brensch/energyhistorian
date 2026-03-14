@@ -227,7 +227,31 @@ Local infrastructure endpoints:
 - MinIO console: `127.0.0.1:9001`
 - ClickHouse HTTP: `127.0.0.1:8123`
 
-The default dev credentials remain `energyhistorian` / `energyhistorian` for Postgres and ClickHouse, and `minio` / `minio123` for MinIO.
+Local Postgres and ClickHouse credentials are sourced from `.env`. MinIO remains `minio` / `minio123`.
+
+To provision ClickHouse users for the historian read/write account and the AI API readonly account:
+
+```bash
+make clickhouse-provision-users
+```
+
+Supported env vars:
+
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `POSTGRES_DB`
+- `DATABASE_URL`
+- `CLICKHOUSE_URL`
+- `CLICKHOUSE_ADMIN_URL`
+- `CLICKHOUSE_ADMIN_USER`
+- `CLICKHOUSE_ADMIN_PASSWORD`
+- `CLICKHOUSE_HISTORIAN_USER`
+- `CLICKHOUSE_HISTORIAN_PASSWORD`
+- `CLICKHOUSE_AI_API_READ_USER`
+- `CLICKHOUSE_AI_API_READ_PASSWORD`
+- `CLICKHOUSE_VIEW_DB`
+- `CLICKHOUSE_USAGE_DB`
+- `CLICKHOUSE_RAW_DATABASES`
 
 ## Notes
 

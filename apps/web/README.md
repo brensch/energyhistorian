@@ -33,7 +33,7 @@ npm install
 npm run dev
 ```
 
-For local dev with backend dev-auth, `public/config.js` already points at `http://localhost:8090` with `enableDevAuth: true`.
+For local dev, `public/config.js` points at `http://localhost:8090` and defaults `enableDevAuth` to `false` so browser auth goes through WorkOS. Re-enable dev auth only if you explicitly want to bypass login during UI work.
 
 ## Container
 

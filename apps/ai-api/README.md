@@ -50,8 +50,11 @@ It returns Server-Sent Events with payloads like:
 Required:
 
 - `DATABASE_URL`
-- `CLICKHOUSE_READ_URL`
-- `CLICKHOUSE_WRITE_URL`
+- `CLICKHOUSE_URL`
+- `CLICKHOUSE_AI_API_READ_USER`
+- `CLICKHOUSE_AI_API_READ_PASSWORD`
+- `CLICKHOUSE_HISTORIAN_USER`
+- `CLICKHOUSE_HISTORIAN_PASSWORD`
 - `WORKOS_ISSUER`
 - `WORKOS_AUDIENCE`
 - one of:
@@ -63,7 +66,7 @@ Optional:
 - `AI_API_PORT` default `8090`
 - `CLICKHOUSE_VIEW_DB` default `semantic`
 - `CLICKHOUSE_USAGE_DB` default `tracking`
-- `ALLOW_DEV_AUTH=true`
+- `ALLOW_DEV_AUTH=false`
 - `ADMIN_EMAILS=a@example.com,b@example.com`
 - Stripe:
   - `STRIPE_SECRET_KEY`
@@ -75,8 +78,8 @@ Optional:
 
 ## Local run
 
-`CLICKHOUSE_READ_URL` must point to a ClickHouse user with `readonly=1` or `readonly=2`.
-The service validates that on startup and refuses to boot if the read DSN is write-capable.
+`CLICKHOUSE_AI_API_READ_USER` must be a ClickHouse user with `readonly=1` or `readonly=2`.
+The service builds the connection from `CLICKHOUSE_URL` and refuses to boot if that read account is write-capable.
 If your semantic views resolve to underlying `raw_*` tables, that readonly user also needs
 `SELECT` on those backing databases. The API still validates generated SQL so LLM-issued
 queries remain constrained to `semantic.*` objects.

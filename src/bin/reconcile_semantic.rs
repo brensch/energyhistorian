@@ -9,9 +9,9 @@ use energyhistorian::source_registry::SourceRegistry;
 struct Args {
     #[arg(long, env = "CLICKHOUSE_URL", default_value = "http://127.0.0.1:8123")]
     clickhouse_url: String,
-    #[arg(long, env = "CLICKHOUSE_USER", default_value = "energyhistorian")]
+    #[arg(long, env = "CLICKHOUSE_HISTORIAN_USER")]
     clickhouse_user: String,
-    #[arg(long, env = "CLICKHOUSE_PASSWORD", default_value = "energyhistorian")]
+    #[arg(long, env = "CLICKHOUSE_HISTORIAN_PASSWORD")]
     clickhouse_password: String,
     #[arg(long)]
     source_id: Option<String>,

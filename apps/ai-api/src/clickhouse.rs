@@ -238,7 +238,7 @@ impl ClickHouseClient {
             .await?;
         if row.readonly == 0 {
             bail!(
-                "CLICKHOUSE_READ_URL must use a readonly ClickHouse user; currentUser()={} readonly={}",
+                "CLICKHOUSE_AI_API_READ_USER must be readonly; currentUser()={} readonly={}",
                 row.user,
                 row.readonly
             );
@@ -250,18 +250,22 @@ impl ClickHouseClient {
 impl HttpConn {
     fn from_dsn(raw: &str) -> Result<Self> {
         let parsed = Url::parse(raw).with_context(|| format!("parsing clickhouse DSN {raw}"))?;
-        let mut base = parsed.clone();
-        if parsed.scheme() == "clickhouse" {
-            base.set_scheme("http").ok();
-            if parsed.port() == Some(9000) {
-                base.set_port(Some(8123)).ok();
-            }
-        }
-        base.set_path("/");
-        base.set_query(None);
+        let scheme = match parsed.scheme() {
+            "clickhouse" => "http",
+            "http" | "https" => parsed.scheme(),
+            other => bail!("unsupported ClickHouse URL scheme `{other}` in {raw}"),
+        };
+        let host = parsed
+            .host_str()
+            .context("clickhouse DSN must include a host")?;
+        let port = parsed.port().unwrap_or(match scheme {
+            "https" => 8443,
+            _ => 8123,
+        });
+        let url = format!("{scheme}://{host}:{port}/");
         Ok(Self {
             client: Client::builder().build()?,
-            url: base.to_string(),
+            url,
             user: parsed.username().to_string(),
             password: parsed.password().map(ToString::to_string),
         })

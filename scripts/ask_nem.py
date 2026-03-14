@@ -9,6 +9,7 @@ import sys
 import textwrap
 import urllib.error
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +27,11 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Image, Paragraph, Preformatted, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
-CLICKHOUSE_HOST = "127.0.0.1"
-CLICKHOUSE_PORT = 8123
-CLICKHOUSE_USER = "energyhistorian"
-CLICKHOUSE_PASSWORD = "energyhistorian"
+CLICKHOUSE_URL = urllib.parse.urlparse(os.getenv("CLICKHOUSE_URL", "http://127.0.0.1:8123"))
+CLICKHOUSE_HOST = CLICKHOUSE_URL.hostname or "127.0.0.1"
+CLICKHOUSE_PORT = CLICKHOUSE_URL.port or 8123
+CLICKHOUSE_USER = os.environ["CLICKHOUSE_HISTORIAN_USER"]
+CLICKHOUSE_PASSWORD = os.environ["CLICKHOUSE_HISTORIAN_PASSWORD"]
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_OUTPUT_ROOT = Path("reports/ask_nem")
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"

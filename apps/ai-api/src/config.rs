@@ -1,6 +1,7 @@
 use std::env;
 
 use anyhow::{Context, Result, bail};
+use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -47,13 +48,35 @@ impl Config {
             other => bail!("unsupported LLM_PROVIDER `{other}`"),
         };
 
+        let clickhouse_url = env_var("CLICKHOUSE_URL");
+        let clickhouse_read_url = match env_var("CLICKHOUSE_READ_URL") {
+            Some(url) => url,
+            None => build_clickhouse_dsn(
+                clickhouse_url.as_deref().context(
+                    "CLICKHOUSE_URL is required when CLICKHOUSE_READ_URL is not set",
+                )?,
+                &required("CLICKHOUSE_AI_API_READ_USER")?,
+                &required("CLICKHOUSE_AI_API_READ_PASSWORD")?,
+            )?,
+        };
+        let clickhouse_write_url = match env_var("CLICKHOUSE_WRITE_URL") {
+            Some(url) => url,
+            None => build_clickhouse_dsn(
+                clickhouse_url.as_deref().context(
+                    "CLICKHOUSE_URL is required when CLICKHOUSE_WRITE_URL is not set",
+                )?,
+                &required("CLICKHOUSE_HISTORIAN_USER")?,
+                &required("CLICKHOUSE_HISTORIAN_PASSWORD")?,
+            )?,
+        };
+
         let config = Self {
             port: env_or("AI_API_PORT", &env_or("PORT", "8090"))
                 .parse()
                 .context("invalid AI_API_PORT")?,
             database_url: required("DATABASE_URL")?,
-            clickhouse_read_url: required("CLICKHOUSE_READ_URL")?,
-            clickhouse_write_url: required("CLICKHOUSE_WRITE_URL")?,
+            clickhouse_read_url,
+            clickhouse_write_url,
             clickhouse_view_db: env_or("CLICKHOUSE_VIEW_DB", "semantic"),
             clickhouse_usage_db: env_or("CLICKHOUSE_USAGE_DB", "tracking"),
             openai_api_key: env_var("OPENAI_API_KEY").or_else(|| env_var("openai_key")),
@@ -128,4 +151,21 @@ fn csv_env(key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn build_clickhouse_dsn(base_url: &str, user: &str, password: &str) -> Result<String> {
+    let mut url =
+        Url::parse(base_url).with_context(|| format!("parsing CLICKHOUSE_URL `{base_url}`"))?;
+    match url.scheme() {
+        "clickhouse" | "http" | "https" => {}
+        other => bail!("unsupported CLICKHOUSE_URL scheme `{other}`"),
+    }
+    url.set_username(user)
+        .map_err(|_| anyhow::anyhow!("invalid CLICKHOUSE username"))?;
+    url.set_password(Some(password))
+        .map_err(|_| anyhow::anyhow!("invalid CLICKHOUSE password"))?;
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_path("/");
+    Ok(url.to_string())
 }

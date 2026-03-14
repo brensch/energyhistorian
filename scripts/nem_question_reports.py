@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import textwrap
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -34,10 +36,11 @@ from reportlab.platypus import (
 
 QUESTION_FILE = Path("nem-questions.txt")
 OUTPUT_ROOT = Path("reports/nem_questions")
-CLICKHOUSE_HOST = "127.0.0.1"
-CLICKHOUSE_PORT = 8123
-CLICKHOUSE_USER = "energyhistorian"
-CLICKHOUSE_PASSWORD = "energyhistorian"
+CLICKHOUSE_URL = urllib.parse.urlparse(os.getenv("CLICKHOUSE_URL", "http://127.0.0.1:8123"))
+CLICKHOUSE_HOST = CLICKHOUSE_URL.hostname or "127.0.0.1"
+CLICKHOUSE_PORT = CLICKHOUSE_URL.port or 8123
+CLICKHOUSE_USER = os.environ["CLICKHOUSE_HISTORIAN_USER"]
+CLICKHOUSE_PASSWORD = os.environ["CLICKHOUSE_HISTORIAN_PASSWORD"]
 
 REGION_DISPATCH_CTE = """
 region_dispatch AS (
