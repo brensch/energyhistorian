@@ -19,7 +19,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - historian-data:/data
+      - ./data:/data
 
   clickhouse:
     image: clickhouse/clickhouse-server:25.2
@@ -154,5 +154,4 @@ services:
 
 volumes:
   clickhouse-data:
-  historian-data:
   postgres-data:
